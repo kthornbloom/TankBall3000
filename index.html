@@ -143,6 +143,11 @@ const MINIGUN_AUDIO_URL = './assets/audio/minigun.mp3';
 const COLLISION_AUDIO_URL = './assets/audio/thud.mp3';
 const FLIGHT_CLUNK_AUDIO_URL = './assets/audio/thud.mp3';
 const MAGNET_AUDIO_URL = './assets/audio/emp.mp3';
+const EXPLOSION_AUDIO_URL = './assets/audio/explode.mp3';
+const MUSIC_TRACKS = [
+  './assets/audio/music/Neon%20Afterimage.mp3',
+  './assets/audio/music/Neon%20Pixel%20Dreams.mp3'
+];
 const ENGINE_AUDIO_URL = './assets/audio/engine.ogg';
 const THRUST_AUDIO_URL = './assets/audio/boost.mp3';
 
@@ -152,6 +157,7 @@ const COLLISION_SPARK_COUNT = 16;
 
 const CANNON_SPEED = 48;
 const CANNON_DAMAGE = 100;
+const MAX_PLAYER_HEALTH = 200;
 const CANNON_COOLDOWN = 1.25;
 const MINIGUN_SPEED = 190;
 const MINIGUN_DAMAGE = 12;
@@ -278,7 +284,7 @@ let multiplayerSendAccumulator = 0;
 let multiplayerPoseSequence = 0;
 let multiplayerShotSequence = 0;
 let multiplayerContactSequence = 0;
-let localTankHealth = 100;
+let localTankHealth = MAX_PLAYER_HEALTH;
 let gameStarted = false;
 let menuOrbitElapsed = 0;
 const playerHealth = new Map();
@@ -353,6 +359,14 @@ minigunAudio.volume = 0.55;
 const collisionAudio = new Audio(COLLISION_AUDIO_URL);
 collisionAudio.preload = 'auto';
 collisionAudio.volume = 0.8;
+const explosionAudio = new Audio(EXPLOSION_AUDIO_URL);
+explosionAudio.preload = 'auto';
+explosionAudio.volume = 0.8;
+const musicAudio = new Audio();
+musicAudio.preload = 'none';
+musicAudio.volume = 0.16;
+let musicTrackIndex = Math.floor(Math.random() * MUSIC_TRACKS.length);
+let musicStarted = false;
 const flightClunkAudio = new Audio(FLIGHT_CLUNK_AUDIO_URL);
 flightClunkAudio.preload = 'auto';
 flightClunkAudio.volume = 0.8;
@@ -671,9 +685,28 @@ function startGame(mode) {
   el('multiplayer-panel').hidden = true;
   engineAudioUnlocked = true;
   startEngineAudio();
+  startGameMusic();
   if (mode) setNetworkStatus(mode === 'freeplay' ? 'Free play' : mode === 'host' ? 'Starting host…' : 'Joining match…');
   showMessage('Click to capture mouse');
 }
+
+function playGameMusicTrack() {
+  musicAudio.src = MUSIC_TRACKS[musicTrackIndex];
+  musicAudio.currentTime = 0;
+  const promise = musicAudio.play();
+  if (promise?.catch) promise.catch(() => { musicStarted = false; });
+}
+
+function startGameMusic() {
+  if (musicStarted) return;
+  musicStarted = true;
+  playGameMusicTrack();
+}
+
+musicAudio.addEventListener('ended', () => {
+  musicTrackIndex = (musicTrackIndex + 1) % MUSIC_TRACKS.length;
+  playGameMusicTrack();
+});
 
 loader.load(LEVEL_URL, gltf => {
   levelRoot.add(gltf.scene);
@@ -748,8 +781,9 @@ loader.load(TANK_URL, gltf => {
 
   if (levelMeshes.length) spawn();
 
-  for (const remote of remoteTanks.values()) {
+  for (const [sessionId, remote] of remoteTanks) {
     if (!remote.root.children.length) attachRemoteModel(remote);
+    if (remote.health <= 0 && remote.hasPose) createTankDestruction(sessionId, remote.root);
   }
 
 }, undefined, error => {
@@ -898,7 +932,7 @@ function ensureRemoteTank(sessionId) {
       targetBodyRotation: null,
       lastSequence: -1,
       latestPose: null,
-      health: 100,
+      health: MAX_PLAYER_HEALTH,
       hasPose: false
     };
     remoteTanks.set(sessionId, remote);
@@ -933,6 +967,24 @@ function applyRemotePose(sessionId, pose, sequence = 0) {
     remote.health = 0;
     createTankDestruction(sessionId, remote.root);
   }
+}
+
+function showRemoteTankDestruction(message) {
+  if (typeof message.sessionId !== 'string' || message.sessionId === multiplayerSessionId) return;
+  const remote = ensureRemoteTank(message.sessionId);
+  if (!remote) return;
+  const pose = message.pose;
+  if (!remote.hasPose && pose && Array.isArray(pose.position) && Array.isArray(pose.rotation) &&
+      [...pose.position, ...pose.rotation].every(Number.isFinite)) {
+    remote.root.position.fromArray(pose.position);
+    remote.root.quaternion.fromArray(pose.rotation).normalize();
+    remote.targetPosition.copy(remote.root.position);
+    remote.targetRotation.copy(remote.root.quaternion);
+    remote.hasPose = true;
+  }
+  remote.health = 0;
+  playerHealth.set(message.sessionId, 0);
+  if (remote.hasPose) createTankDestruction(message.sessionId, remote.root);
 }
 
 function updateRemoteTanks(dt) {
@@ -1039,13 +1091,21 @@ function sendToHost(message) {
   else if (hostConnection?.open) hostConnection.send(message);
 }
 
+function broadcastTankDestroyed(sessionId) {
+  if (!multiplayerHost) return;
+  const pose = sessionId === multiplayerSessionId
+    ? localTankPose()
+    : multiplayerPoses.get(sessionId)?.pose;
+  broadcastToPeers({ type: 'tank-destroyed', sessionId, pose: pose || null });
+}
+
 function updateTankHealth(sessionId, health) {
-  const previous = playerHealth.get(sessionId) ?? 100;
-  const safeHealth = THREE.MathUtils.clamp(Number(health) || 0, 0, 100);
+  const previous = playerHealth.get(sessionId) ?? MAX_PLAYER_HEALTH;
+  const safeHealth = THREE.MathUtils.clamp(Number(health) || 0, 0, MAX_PLAYER_HEALTH);
   playerHealth.set(sessionId, safeHealth);
   if (sessionId === multiplayerSessionId) {
     localTankHealth = safeHealth;
-    el('tank-health').textContent = `${Math.ceil(safeHealth)}%`;
+    el('tank-health').textContent = `${Math.ceil(safeHealth / MAX_PLAYER_HEALTH * 100)}%`;
     if (safeHealth <= 0 && previous > 0) destroyLocalPlayer();
   } else {
     const remote = remoteTanks.get(sessionId);
@@ -1095,8 +1155,10 @@ function createTankDestruction(sessionId, root) {
     fragments.push(item);
     tankFragments.push(item);
   });
+  if (!fragments.length) return;
   root.visible = false;
   tankDestructions.set(sessionId, { root, fragments });
+  playOneShot(explosionAudio);
 }
 
 function clearTankDestruction(sessionId) {
@@ -1168,11 +1230,11 @@ function respawnLocalPlayer() {
   spawn();
   clearTankDestruction(sessionId);
   tankRoot.visible = !firstPerson;
-  localTankHealth = 100;
-  playerHealth.set(sessionId, 100);
+  localTankHealth = MAX_PLAYER_HEALTH;
+  playerHealth.set(sessionId, MAX_PLAYER_HEALTH);
   el('tank-health').textContent = '100%';
   if (multiplayerPeer) {
-    if (multiplayerHost) broadcastToPeers({ type: 'tank-health', sessionId, health: 100 });
+    if (multiplayerHost) broadcastToPeers({ type: 'tank-health', sessionId, health: MAX_PLAYER_HEALTH });
     else if (hostConnection?.open) hostConnection.send({ type: 'respawn' });
   }
   showMessage('TANK RESPAWNED');
@@ -1211,6 +1273,13 @@ function handlePeerMessage(connection, message) {
 
   if (message.type === 'fire' && multiplayerHost) {
     acceptRemoteShot(connection.peer, message);
+    return;
+  }
+
+  if (message.type === 'weapon-shot' && multiplayerHost) {
+    if (message.weapon === 'cannon') {
+      broadcastToPeers({ type: 'weapon-shot', sessionId: connection.peer, weapon: 'cannon' }, connection.peer);
+    }
     return;
   }
 
@@ -1253,8 +1322,17 @@ function handlePeerMessage(connection, message) {
   if (message.type === 'projectile-start') {
     if (message.shot?.ownerId !== multiplayerSessionId) {
       createProjectile(message.shot, false);
-      if (message.shot?.weapon === 'cannon') playOneShot(cannonAudio);
     }
+    return;
+  }
+
+  if (message.type === 'weapon-shot') {
+    if (message.sessionId !== multiplayerSessionId && message.weapon === 'cannon') playOneShot(cannonAudio);
+    return;
+  }
+
+  if (message.type === 'tank-destroyed') {
+    showRemoteTankDestruction(message);
     return;
   }
 
@@ -1290,8 +1368,8 @@ function handlePeerMessage(connection, message) {
     multiplayerSessionId = null;
     el('join-game').disabled = false;
   } else if (message.type === 'respawn' && multiplayerHost) {
-    updateTankHealth(connection.peer, 100);
-    broadcastToPeers({ type: 'tank-health', sessionId: connection.peer, health: 100 });
+    updateTankHealth(connection.peer, MAX_PLAYER_HEALTH);
+    broadcastToPeers({ type: 'tank-health', sessionId: connection.peer, health: MAX_PLAYER_HEALTH });
   } else if (message.type === 'hello' && multiplayerHost) {
     for (const [sessionId, health] of playerHealth) {
       connection.send({ type: 'tank-health', sessionId, health });
@@ -1322,8 +1400,8 @@ function attachPeerConnection(connection, incoming = false) {
   connection.on('open', () => {
     peerConnections.set(connection.peer, connection);
     if (multiplayerHost) {
-      playerHealth.set(connection.peer, 100);
-      connection.send({ type: 'tank-health', sessionId: connection.peer, health: 100 });
+      playerHealth.set(connection.peer, MAX_PLAYER_HEALTH);
+      connection.send({ type: 'tank-health', sessionId: connection.peer, health: MAX_PLAYER_HEALTH });
       connection.send({ type: 'tank-health', sessionId: multiplayerSessionId, health: localTankHealth });
       for (const [peerId, health] of playerHealth) {
         if (peerId !== connection.peer) connection.send({ type: 'tank-health', sessionId: peerId, health });
@@ -1820,8 +1898,13 @@ function fireShot() {
   createProjectile(shot, authoritative);
 
   if (multiplayerPeer) {
-    if (multiplayerHost) broadcastToPeers({ type: 'projectile-start', shot });
-    else sendToHost({ type: 'fire', shot });
+    if (multiplayerHost) {
+      broadcastToPeers({ type: 'projectile-start', shot });
+      if (isCannon) broadcastToPeers({ type: 'weapon-shot', sessionId: multiplayerSessionId, weapon: 'cannon' });
+    } else {
+      sendToHost({ type: 'fire', shot });
+      if (isCannon) sendToHost({ type: 'weapon-shot', weapon: 'cannon' });
+    }
   }
 
   if (isCannon) {
@@ -1973,9 +2056,10 @@ function updateShots(dt) {
         const worldHit = hits.length ? hits[0] : null;
 
         if (tankHit && (!worldHit || tankHit.distance < worldHit.distance)) {
-          const health = Math.max(0, (playerHealth.get(tankHit.targetId) ?? 100) - shot.damage);
+          const health = Math.max(0, (playerHealth.get(tankHit.targetId) ?? MAX_PLAYER_HEALTH) - shot.damage);
           updateTankHealth(tankHit.targetId, health);
           if (multiplayerHost) broadcastToPeers({ type: 'tank-health', sessionId: tankHit.targetId, health });
+          if (health <= 0) broadcastTankDestroyed(tankHit.targetId);
           spawnImpact(tankHit.point, 0xff4a35, shot.weapon === 'cannon' ? 0.65 : 0.24);
           if (shot.networked && multiplayerHost) broadcastToPeers({ type: 'projectile-end', shotId: shot.shotId, weapon: shot.weapon, targetId: tankHit.targetId, health, point: tankHit.point.toArray() });
           removeProjectile(shot);
@@ -2649,7 +2733,11 @@ function update(dt) {
           flightAimDirection.copy(movement).normalize();
           flightAimUp.copy(normal);
           flightState = 'drifting';
-          beginFreeFall();
+          // Leaving a surface without detaching is still a fresh flight: the
+          // player has the full thrust reserve available when they go airborne.
+          thrustRemaining = THRUST_DURATION;
+          freeFallStarted = false;
+          showMessage('FREE FLOAT — SPACE TO THRUST — PRESS LEFT CTRL TO RE-ENGAGE');
         }
       }
     }
