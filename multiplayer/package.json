@@ -1,0 +1,12 @@
+{
+  "name": "tankball3000-multiplayer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "colyseus": "^0.18.0"
+  }
+}

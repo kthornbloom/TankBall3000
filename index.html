@@ -1,0 +1,2315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ball Tank</title>
+<link rel="stylesheet" href="styles.css">
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+    "@colyseus/sdk": "https://esm.sh/@colyseus/sdk@0.18"
+  }
+}
+</script>
+</head>
+
+<body>
+
+<div id="hud">
+  <strong>BALL TANK</strong><br>
+  View: <span id="view">Third person</span><br>
+  Speed: <span id="speed">0</span><br>
+  Ground boost: <span id="ground-boost">Ready</span><br>
+  Weapon: <span id="weapon">Main cannon [1]</span><br>
+  Targets: <span id="targets">0 / 0 destroyed</span><br>
+  Flight: <span id="flight">Magnetized</span><br>
+  Surface: <span id="surface">0, 1, 0</span>
+</div>
+
+<div id="help">
+  <strong>CONTROLS</strong><br>
+  <kbd>W</kbd>/<kbd>S</kbd> Forward / Reverse<br>
+  <kbd>A</kbd>/<kbd>D</kbd> Strafe<br>
+  Mouse: Aim / Look<br>
+  Left click: Fire / hold for MG<br>
+  Right click: Hold to zoom<br>
+  <kbd>1</kbd> Main cannon / <kbd>2</kbd> Minigun<br>
+  <kbd>C</kbd> First / Third person<br>
+  <kbd>Shift</kbd> Ground boost (1 second)<br>
+  <kbd>Space</kbd> Detach / hold to thrust (3 seconds total)<br>
+  <kbd>Left Ctrl</kbd> Re-engage magnets<br>
+  Mouse freely aims during flight<br>
+  <kbd>Esc</kbd> Release mouse
+</div>
+
+<div id="crosshair"><span></span></div>
+<div id="message">Click to capture mouse</div>
+<div id="network-status" aria-live="polite"></div>
+
+<script type="module">
+
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+// ============================================================
+// SETTINGS
+// ============================================================
+
+const LEVEL_URL = './assets/levels/test-lvl.glb';
+const TANK_URL = './assets/tanks/test-tank.glb';
+
+const MODEL_SCALE = 1;
+const MODEL_FORWARD_NEGATIVE_Z = true;
+
+const BALL_CLEARANCE = 0.08;
+
+const MAX_SPEED = 11;
+const MAX_REVERSE_SPEED = 5;
+const GROUND_BOOST_MAX_SPEED = 40;
+
+const DRIVE_ACCEL = 7.5;
+const STRAFE_ACCEL = 6.5;
+const DRAG = 2.0;
+
+const MOUSE_SENSITIVITY = 0.0025;
+const MAX_AIM_PITCH = 1.48; // Approximately 85 degrees
+
+const TURN_RATE = 2.7;
+const TURN_RESPONSE = 5;
+
+const CAMERA_DISTANCE = 9.5;
+const CAMERA_HEIGHT = 5.0;
+const CAMERA_MIN_DISTANCE = 4.5;
+const CAMERA_MAX_DISTANCE = 20;
+const CAMERA_DISTANCE_STEP = 0.9;
+const CAMERA_ZOOM_FOV = 42;
+const CAMERA_FADE_RADIUS = 4.5;
+const CAMERA_FADE_STRENGTH = 0.92;
+
+const SURFACE_RESPONSE = 16;
+
+const BODY_ACCEL_LEAN = 0.018;
+const BODY_TURN_LEAN = 0.11;
+const BODY_LEAN_RESPONSE = 7;
+
+const GROUND_BOOST_DURATION = 1;
+const GROUND_BOOST_IMPULSE = 8;
+const GROUND_BOOST_WOBBLE_RATE = 19;
+const GROUND_BOOST_AIM_WOBBLE = 0.035;
+
+const MAX_SHOT_DISTANCE = 250;
+
+// Add these files to ./assets/audio/ (or change the paths here).
+const CANNON_AUDIO_URL = './assets/audio/primary-shot.flac';
+const MINIGUN_AUDIO_URL = './assets/audio/minigun.mp3';
+const COLLISION_AUDIO_URL = './assets/audio/thud.mp3';
+const FLIGHT_CLUNK_AUDIO_URL = './assets/audio/thud.mp3';
+const ENGINE_AUDIO_URL = './assets/audio/engine.ogg';
+const THRUST_AUDIO_URL = './assets/audio/boost.mp3';
+
+const DRIVE_COLLISION_THRESHOLD = 3.5;
+const COLLISION_COOLDOWN = 0.3;
+const COLLISION_SPARK_COUNT = 16;
+
+const CANNON_SPEED = 48;
+const CANNON_DAMAGE = 100;
+const CANNON_COOLDOWN = 1.25;
+const MINIGUN_SPEED = 190;
+const MINIGUN_DAMAGE = 12;
+const MINIGUN_INTERVAL = 0.085;
+const TARGET_STARTING_HEALTH = 100;
+
+const THRUST_DURATION = 3; // Total available thrust time per detach
+const REATTACH_ORIENT_DURATION = 1.5;
+const FLIGHT_PUSH_OFF = 8;
+const FLIGHT_INITIAL_SPEED = 3.5;
+const THRUST_ACCELERATION = 10;
+const FLIGHT_DRAG = 0.12;
+const REATTACH_ACCEL = 42;
+const REATTACH_DRAG = 2.2;
+
+// ============================================================
+// THREE.JS SETUP
+// ============================================================
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x101722);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1;
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+const camera = new THREE.PerspectiveCamera(
+  65, innerWidth / innerHeight, 0.05, 1500
+);
+
+// 2. Load HDRI Environment Map using modern imports
+// const pmremGenerator = new THREE.PMREMGenerator(renderer);
+// pmremGenerator.compileEquirectangularShader();
+
+// new RGBELoader().load('assets/levels/backdrop.hdr', texture => {
+//   const envMap = pmremGenerator.fromEquirectangular(texture).texture;
+
+//   scene.environment = envMap;
+//   scene.background = envMap;
+
+//   texture.dispose();
+//   pmremGenerator.dispose();
+
+//   loadGltfModel();
+// });
+
+// Green-tinted ambient illumination
+const ambientLight = new THREE.HemisphereLight(
+  0xc8e8d0,
+  0x18251b,
+  1.4
+);
+scene.add(ambientLight);
+
+// Soft green directional fill
+const greenFill = new THREE.DirectionalLight(0x9bc9a5, 0.5);
+greenFill.position.set(-15, 10, -10);
+scene.add(greenFill);
+
+// Central white point light
+const centerLight = new THREE.PointLight(
+  0xffffff,
+  250,
+  250,
+  1.4
+);
+
+centerLight.position.set(0, 0, 0);
+centerLight.castShadow = true;
+
+centerLight.shadow.mapSize.set(2048, 2048);
+centerLight.shadow.camera.near = 1;
+centerLight.shadow.camera.far = 250;
+
+centerLight.shadow.bias = -0.0001;
+centerLight.shadow.normalBias = 0.015;
+
+// Softer shadow edges
+centerLight.shadow.radius = 3;
+
+scene.add(centerLight);
+
+// Enable soft shadow filtering
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const levelRoot = new THREE.Group();
+const tankRoot = new THREE.Group();
+
+scene.add(levelRoot, tankRoot);
+
+const loader = new GLTFLoader();
+const raycaster = new THREE.Raycaster();
+const clock = new THREE.Clock();
+
+const V = () => new THREE.Vector3();
+
+const position = new THREE.Vector3();
+const normal = new THREE.Vector3(0, 1, 0);
+const heading = new THREE.Vector3(0, 0, -1);
+const aimDirection = new THREE.Vector3(0, 0, -1);
+const flightAimDirection = new THREE.Vector3(0, 0, -1);
+const flightAimUp = new THREE.Vector3(0, 1, 0);
+
+let ballMesh = null;
+let bodyGroup = null;
+let gunGroup = null;
+let muzzleMarker = null;
+let tankModelTemplate = null;
+const remoteTanks = new Map();
+let multiplayerRoom = null;
+let multiplayerSessionId = null;
+let multiplayerSendAccumulator = 0;
+
+let levelMeshes = [];
+let ballRadius = 1;
+
+let forwardSpeed = 0;
+let strafeSpeed = 0;
+
+let aimPitch = 0;
+let bodyPitchLean = 0;
+let bodySideLean = 0;
+
+let previousForwardSpeed = 0;
+let previousStrafeSpeed = 0;
+
+let firstPerson = false;
+let thirdPersonDistance = CAMERA_DISTANCE;
+let mouseCaptured = false;
+let rightMouseHeld = false;
+
+let groundBoostRemaining = 0;
+let groundBoostClock = 0;
+let groundBoostWobbleYaw = 0;
+let groundBoostWobblePitch = 0;
+
+const keys = {};
+const projectiles = [];
+const targets = [];
+
+let selectedWeapon = 'cannon';
+let fireHeld = false;
+let minigunAccumulator = 0;
+let weaponCooldown = 0;
+let flightState = 'attached'; // attached, flying, orienting, reattaching
+let thrustRemaining = 0;
+let flightSpaceHeld = false;
+let reattachElapsed = 0;
+let reattachPlayClank = true;
+let unsupportedSurfaceTime = 0;
+let reattachStartDistance = 1;
+let reattachOrientProgress = 0;
+const cameraLookTarget = new THREE.Vector3();
+const flightVelocity = new THREE.Vector3();
+const reattachVelocity = new THREE.Vector3();
+const reattachTarget = new THREE.Vector3();
+const reattachNormal = new THREE.Vector3(0, 1, 0);
+const reattachFromNormal = new THREE.Vector3(0, 1, 0);
+const reattachFromHeading = new THREE.Vector3(0, 0, -1);
+const reattachFromAim = new THREE.Vector3(0, 0, -1);
+const reattachOrientQuat = new THREE.Quaternion();
+let thrusterMesh = null;
+let thrusterBaseQuaternion = null;
+let thrusterBasePosition = null;
+let thrusterBaseScale = null;
+
+const cannonAudio = new Audio(CANNON_AUDIO_URL);
+cannonAudio.preload = 'auto';
+cannonAudio.volume = 0.8;
+const minigunAudio = new Audio(MINIGUN_AUDIO_URL);
+minigunAudio.preload = 'auto';
+minigunAudio.loop = true;
+minigunAudio.volume = 0.55;
+const collisionAudio = new Audio(COLLISION_AUDIO_URL);
+collisionAudio.preload = 'auto';
+collisionAudio.volume = 0.45;
+const flightClunkAudio = new Audio(FLIGHT_CLUNK_AUDIO_URL);
+flightClunkAudio.preload = 'auto';
+flightClunkAudio.volume = 0.8;
+const engineAudio = new Audio(ENGINE_AUDIO_URL);
+engineAudio.preload = 'auto';
+engineAudio.loop = false; // Web Audio handles the engine loop without media-element loop gaps.
+engineAudio.volume = 0;
+const EngineAudioContext = window.AudioContext || window.webkitAudioContext;
+const engineAudioContext = EngineAudioContext ? new EngineAudioContext() : null;
+const engineGain = engineAudioContext ? engineAudioContext.createGain() : null;
+if (engineGain) {
+  engineGain.gain.value = 0;
+  engineGain.connect(engineAudioContext.destination);
+}
+let engineBuffer = null;
+let engineSource = null;
+if (engineAudioContext) fetch(ENGINE_AUDIO_URL)
+  .then(response => response.arrayBuffer())
+  .then(data => engineAudioContext.decodeAudioData(data))
+  .then(buffer => {
+    engineBuffer = buffer;
+    if (engineAudioUnlocked) startEngineAudio();
+  })
+  .catch(() => {});
+const thrustAudio = new Audio(THRUST_AUDIO_URL);
+thrustAudio.preload = 'auto';
+thrustAudio.loop = true;
+thrustAudio.volume = 0.55;
+
+const materialDefaults = new Map();
+const cameraFadeMaterials = new Map();
+const fadedMaterials = new Set();
+const collisionSparks = [];
+let lastCollisionTime = -Infinity;
+let engineAudioUnlocked = false;
+
+const el = id => document.getElementById(id);
+
+// ============================================================
+// ASSET LOADING
+// ============================================================
+
+function installLocalizedCameraFade(material) {
+  // The fade is evaluated per-fragment in world space. The material can stay
+  // one mesh/material; only pixels near the camera's obstruction point fade.
+  const state = {
+    center: new THREE.Vector3(),
+    radius: CAMERA_FADE_RADIUS,
+    strength: 0,
+    uniforms: null
+  };
+
+  cameraFadeMaterials.set(material, state);
+
+  const previousCompile = material.onBeforeCompile;
+  const previousCacheKey = material.customProgramCacheKey
+    ? material.customProgramCacheKey.bind(material)
+    : () => '';
+
+  material.onBeforeCompile = shader => {
+    if (previousCompile) previousCompile.call(material, shader);
+
+    shader.uniforms.uCameraFadeCenter = { value: state.center };
+    shader.uniforms.uCameraFadeRadius = { value: state.radius };
+    shader.uniforms.uCameraFadeStrength = { value: state.strength };
+    state.uniforms = shader.uniforms;
+
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <common>',
+      '#include <common>\nvarying vec3 vCameraFadeWorldPosition;'
+    );
+
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <begin_vertex>',
+      '#include <begin_vertex>\nvec4 cameraFadeWorldPosition = modelMatrix * vec4(transformed, 1.0);\nvCameraFadeWorldPosition = cameraFadeWorldPosition.xyz;'
+    );
+
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <common>',
+      '#include <common>\nvarying vec3 vCameraFadeWorldPosition;\nuniform vec3 uCameraFadeCenter;\nuniform float uCameraFadeRadius;\nuniform float uCameraFadeStrength;'
+    );
+
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <color_fragment>',
+      '#include <color_fragment>\nfloat cameraFadeDistance = distance(vCameraFadeWorldPosition, uCameraFadeCenter);\nfloat cameraFadeMask = 1.0 - smoothstep(uCameraFadeRadius * 0.45, uCameraFadeRadius, cameraFadeDistance);\ndiffuseColor.a *= 1.0 - cameraFadeMask * uCameraFadeStrength;'
+    );
+  };
+
+  material.customProgramCacheKey = () =>
+    previousCacheKey() + '|localized-camera-fade-v1';
+}
+
+function setCameraFade(material, center, strength) {
+  const state = cameraFadeMaterials.get(material);
+  if (!state) return;
+
+  state.center.copy(center);
+  state.strength = strength;
+  state.radius = CAMERA_FADE_RADIUS;
+
+  if (state.uniforms) {
+    state.uniforms.uCameraFadeCenter.value = state.center;
+    state.uniforms.uCameraFadeRadius.value = state.radius;
+    state.uniforms.uCameraFadeStrength.value = state.strength;
+  }
+}
+
+function configureImportedLights(root) {
+  root.traverse(obj => {
+    if (!obj.isLight) return;
+
+    if (obj.isPointLight || obj.isSpotLight) {
+      obj.decay = 2;
+    }
+
+    console.log(
+      'Imported light:',
+      obj.name || obj.type,
+      'intensity',
+      obj.intensity.toFixed(3)
+    );
+  });
+}
+
+function collectMeshes(root) {
+  const meshes = [];
+
+  root.traverse(obj => {
+    if (!obj.isMesh) return;
+
+    obj.castShadow = true;
+    obj.receiveShadow = true;
+
+    const materials = Array.isArray(obj.material)
+      ? obj.material : [obj.material];
+
+    materials.forEach(mat => {
+      if (!mat) return;
+
+      mat.side = THREE.DoubleSide;
+
+      if (!materialDefaults.has(mat)) {
+        materialDefaults.set(mat, {
+          opacity: mat.opacity,
+          transparent: mat.transparent,
+          depthWrite: mat.depthWrite
+        });
+        installLocalizedCameraFade(mat);
+      }
+    });
+
+    meshes.push(obj);
+  });
+
+  return meshes;
+}
+
+function registerTargets(root) {
+  targets.length = 0;
+
+  root.traverse(obj => {
+    if (!obj.name || !obj.name.toLowerCase().startsWith('target-')) return;
+
+    const meshes = [];
+    obj.traverse(child => {
+      if (child.isMesh) meshes.push(child);
+    });
+    if (!meshes.length) return;
+
+    const record = {
+      name: obj.name,
+      root: obj,
+      meshes,
+      health: TARGET_STARTING_HEALTH,
+      maxHealth: TARGET_STARTING_HEALTH,
+      destroyed: false
+    };
+
+    meshes.forEach(mesh => {
+      mesh.userData.targetRecord = record;
+      // Clone materials so damage tinting never changes unrelated level pieces.
+      if (Array.isArray(mesh.material)) {
+        mesh.material = mesh.material.map(mat => mat ? mat.clone() : mat);
+        mesh.material.forEach(mat => {
+          if (!mat) return;
+          materialDefaults.set(mat, {
+            opacity: mat.opacity,
+            transparent: mat.transparent,
+            depthWrite: mat.depthWrite
+          });
+          installLocalizedCameraFade(mat);
+        });
+      } else if (mesh.material) {
+        mesh.material = mesh.material.clone();
+        materialDefaults.set(mesh.material, {
+          opacity: mesh.material.opacity,
+          transparent: mesh.material.transparent,
+          depthWrite: mesh.material.depthWrite
+        });
+        installLocalizedCameraFade(mesh.material);
+      }
+    });
+
+    targets.push(record);
+  });
+
+  updateTargetHud();
+  console.info(`Registered ${targets.length} target(s). Name level objects with target- prefix.`);
+}
+
+function updateTargetHud(lastTarget = null) {
+  const destroyed = targets.filter(target => target.destroyed).length;
+  let label = `${destroyed} / ${targets.length} destroyed`;
+  if (lastTarget && !lastTarget.destroyed) {
+    label += ` · ${lastTarget.name}: ${Math.ceil(lastTarget.health)} HP`;
+  } else if (lastTarget && lastTarget.destroyed) {
+    label += ` · ${lastTarget.name} destroyed`;
+  }
+  el('targets').textContent = label;
+}
+
+function findTargetRecord(object) {
+  let current = object;
+  while (current) {
+    if (current.userData && current.userData.targetRecord) {
+      return current.userData.targetRecord;
+    }
+    current = current.parent;
+  }
+  return null;
+}
+
+function damageTarget(object, amount) {
+  const target = findTargetRecord(object);
+  if (!target || target.destroyed) return;
+
+  target.health = Math.max(0, target.health - amount);
+  const ratio = target.health / target.maxHealth;
+
+  target.meshes.forEach(mesh => {
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    mats.forEach(mat => {
+      if (!mat || !mat.color) return;
+      if (!mat.userData.originalTargetColor) {
+        mat.userData.originalTargetColor = mat.color.clone();
+      }
+      mat.color.copy(mat.userData.originalTargetColor).lerp(
+        new THREE.Color(0xff2418), 1 - ratio
+      );
+      if (mat.emissive) {
+        mat.emissive.setHex(0x4a0800);
+        mat.emissiveIntensity = (1 - ratio) * 0.65;
+      }
+    });
+  });
+
+  if (target.health <= 0) {
+    target.destroyed = true;
+    target.meshes.forEach(mesh => {
+      mesh.visible = false;
+      const index = levelMeshes.indexOf(mesh);
+      if (index >= 0) levelMeshes.splice(index, 1);
+    });
+    showMessage(`${target.name} destroyed!`);
+  }
+
+  updateTargetHud(target);
+}
+
+function spawn() {
+  const bounds = new THREE.Box3().setFromObject(levelRoot);
+
+  position.set(
+    (bounds.min.x + bounds.max.x) / 2,
+    bounds.min.y + ballRadius + BALL_CLEARANCE + 0.15,
+    (bounds.min.z + bounds.max.z) / 2
+  );
+
+  normal.set(0, 1, 0);
+  heading.set(0, 0, -1);
+  aimDirection.copy(heading);
+
+  snapToSurface(0);
+
+  updateTankTransform();
+
+  camera.position.copy(position)
+    .addScaledVector(normal, CAMERA_HEIGHT)
+    .addScaledVector(heading, -CAMERA_DISTANCE);
+
+  camera.lookAt(position);
+  cameraLookTarget.copy(position);
+}
+
+loader.load(LEVEL_URL, gltf => {
+  levelRoot.add(gltf.scene);
+  configureImportedLights(gltf.scene);
+  levelMeshes = collectMeshes(gltf.scene);
+  registerTargets(gltf.scene);
+
+  spawn();
+  el('surface').textContent = 'Level loaded';
+
+}, undefined, error => {
+  console.error('Level loading failed:', error);
+
+  // Fallback interior cube for testing.
+  const cube = new THREE.Mesh(
+    new THREE.BoxGeometry(70, 70, 70, 12, 12, 12),
+    new THREE.MeshStandardMaterial({
+      color: 0x293b4c,
+      side: THREE.BackSide
+    })
+  );
+
+  levelRoot.add(cube);
+  levelMeshes = [cube];
+  registerTargets(cube);
+  spawn();
+});
+
+loader.load(TANK_URL, gltf => {
+
+  const model = gltf.scene;
+  tankModelTemplate = model;
+  model.scale.setScalar(MODEL_SCALE);
+  tankRoot.add(model);
+  tankRoot.visible = !firstPerson;
+  configureImportedLights(model);
+
+  model.traverse(obj => {
+    if (obj.isMesh) {
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+    }
+    if (obj.name === 'Ball') ballMesh = obj;
+    if (obj.name === 'Body') bodyGroup = obj;
+    if (obj.name === 'Gun') gunGroup = obj;
+    if (obj.name === 'Muzzle') muzzleMarker = obj;
+
+    if (obj.name && obj.name.toLowerCase() === 'thruster') {
+      thrusterMesh = obj;
+      thrusterBaseQuaternion = obj.quaternion.clone();
+      thrusterBasePosition = obj.position.clone();
+      thrusterBaseScale = obj.scale.clone();
+      obj.visible = false;
+      console.log('Thruster found:', obj.name);
+    }
+    
+  });
+  if (!ballMesh) console.warn('Missing Ball mesh');
+  if (!bodyGroup) console.warn('Missing Body group');
+  if (!gunGroup) console.warn('Missing Gun group');
+
+  if (ballMesh) {
+    const bounds = new THREE.Box3().setFromObject(ballMesh);
+    const size = bounds.getSize(V());
+    ballRadius = Math.max(size.x, size.y, size.z) / 2;
+  }
+
+  if (levelMeshes.length) spawn();
+
+  for (const remote of remoteTanks.values()) {
+    if (!remote.root.children.length) attachRemoteModel(remote);
+  }
+
+}, undefined, error => {
+  console.error('Tank loading failed:', error);
+  el('message').textContent = 'Could not load tank.glb';
+});
+
+// ============================================================
+// SURFACE FOLLOWING
+// ============================================================
+
+function snapToSurface(maxDistance = 2.5, dt = 0) {
+  if (!levelMeshes.length) return false;
+
+  const offset = Math.max(4, ballRadius + 2);
+
+  const origin = position.clone().addScaledVector(normal, offset);
+
+  raycaster.set(origin, normal.clone().negate());
+  raycaster.far = maxDistance + offset;
+
+  const hits = raycaster.intersectObjects(levelMeshes, true);
+
+  if (!hits.length) return false;
+
+  const hit = hits[0];
+
+  // A ray can see a lower platform through a gap. Only accept it as magnetic
+  // support when its point remains close to the tank's ball.
+  if (hit.point.distanceTo(position) > ballRadius + BALL_CLEARANCE + 0.75) return false;
+
+  let targetNormal = hit.normal
+    ? hit.normal.clone().normalize()
+    : hit.face.normal.clone()
+        .transformDirection(hit.object.matrixWorld)
+        .normalize();
+
+  if (targetNormal.dot(normal) < 0) {
+    targetNormal.negate();
+  }
+
+  if (dt > 0) {
+    normal.lerp(
+      targetNormal,
+      1 - Math.exp(-SURFACE_RESPONSE * dt)
+    ).normalize();
+  } else {
+    normal.copy(targetNormal);
+  }
+
+  position.copy(hit.point)
+    .addScaledVector(normal, ballRadius + BALL_CLEARANCE);
+
+  return true;
+}
+
+// ============================================================
+// AIMING
+// ============================================================
+
+function getAimDirection() {
+  if (flightState === 'flying' || flightState === 'drifting') {
+    return flightAimDirection.clone().normalize();
+  }
+
+  const yawed = aimDirection.clone()
+    .applyAxisAngle(normal, groundBoostWobbleYaw);
+
+  const pitch = THREE.MathUtils.clamp(
+  aimPitch + groundBoostWobblePitch,
+    -MAX_AIM_PITCH,
+    MAX_AIM_PITCH
+  );
+
+  return yawed.multiplyScalar(Math.cos(pitch))
+    .addScaledVector(normal, Math.sin(pitch))
+    .normalize();
+}
+
+function updateTankTransform() {
+
+  tankRoot.position.copy(position);
+
+  const f = heading.clone().projectOnPlane(normal).normalize();
+  const right = new THREE.Vector3().crossVectors(f, normal).normalize();
+  const back = f.clone().negate();
+
+  const basis = new THREE.Matrix4().makeBasis(right, normal, back);
+
+  tankRoot.quaternion.setFromRotationMatrix(basis);
+
+  if (bodyGroup) {
+    bodyGroup.rotation.order = 'YXZ';
+    const visualAim = getAimDirection();
+    const tangentAim = visualAim.clone()
+      .projectOnPlane(normal).normalize();
+
+    const yaw = Math.atan2(
+      heading.clone().cross(tangentAim).dot(normal),
+      heading.dot(tangentAim)
+    );
+
+    const pitch = Math.asin(
+      THREE.MathUtils.clamp(visualAim.dot(normal), -1, 1)
+    );
+
+    bodyGroup.rotation.y =
+      MODEL_FORWARD_NEGATIVE_Z ? yaw : -yaw;
+
+    bodyGroup.rotation.x =
+      (MODEL_FORWARD_NEGATIVE_Z ? pitch : -pitch) + bodyPitchLean;
+
+    bodyGroup.rotation.z = bodySideLean;
+  }
+}
+
+// Remote tanks are visual replicas only in this first networking milestone.
+// The local browser still simulates movement; the server currently relays poses.
+function attachRemoteModel(remote) {
+  if (!tankModelTemplate || remote.root.children.length) return;
+  const model = tankModelTemplate.clone(true);
+  remote.body = null;
+  model.traverse(object => {
+    if (object.name === 'Body') remote.body = object;
+  });
+  remote.root.add(model);
+}
+
+function ensureRemoteTank(sessionId) {
+  if (sessionId === multiplayerSessionId) return null;
+  let remote = remoteTanks.get(sessionId);
+  if (!remote) {
+    const root = new THREE.Group();
+    scene.add(root);
+    remote = {
+      root,
+      body: null,
+      targetPosition: new THREE.Vector3(),
+      targetRotation: new THREE.Quaternion(),
+      targetBodyRotation: null,
+      hasPose: false
+    };
+    remoteTanks.set(sessionId, remote);
+    attachRemoteModel(remote);
+  }
+  return remote;
+}
+
+function applyRemotePose(sessionId, pose) {
+  if (!pose || !Array.isArray(pose.position) || !Array.isArray(pose.rotation)) return;
+  if (![...pose.position, ...pose.rotation].every(Number.isFinite)) return;
+  const remote = ensureRemoteTank(sessionId);
+  if (!remote) return;
+  remote.targetPosition.fromArray(pose.position);
+  remote.targetRotation.fromArray(pose.rotation).normalize();
+  if (Array.isArray(pose.bodyRotation) && pose.bodyRotation.every(Number.isFinite)) {
+    remote.targetBodyRotation = pose.bodyRotation;
+  }
+  if (!remote.hasPose) {
+    remote.root.position.copy(remote.targetPosition);
+    remote.root.quaternion.copy(remote.targetRotation);
+    remote.hasPose = true;
+  }
+}
+
+function updateRemoteTanks(dt) {
+  for (const remote of remoteTanks.values()) {
+    if (!remote.hasPose) continue;
+    const blend = 1 - Math.exp(-14 * dt);
+    remote.root.position.lerp(remote.targetPosition, blend);
+    remote.root.quaternion.slerp(remote.targetRotation, blend);
+    if (remote.body && remote.targetBodyRotation) {
+      remote.body.rotation.order = 'YXZ';
+      remote.body.rotation.x += (remote.targetBodyRotation[0] - remote.body.rotation.x) * blend;
+      remote.body.rotation.y += (remote.targetBodyRotation[1] - remote.body.rotation.y) * blend;
+      remote.body.rotation.z += (remote.targetBodyRotation[2] - remote.body.rotation.z) * blend;
+    }
+  }
+}
+
+async function joinMultiplayerRoom() {
+  const status = el('network-status');
+  status.textContent = 'Connecting to multiplayer…';
+  status.classList.add('visible');
+  try {
+    const { Client } = await import('@colyseus/sdk');
+    const endpoint = new URLSearchParams(location.search).get('server') || 'http://localhost:2567';
+    const client = new Client(endpoint);
+    multiplayerRoom = await client.joinOrCreate('battle');
+    multiplayerSessionId = multiplayerRoom.sessionId;
+    multiplayerRoom.onMessage('player-joined', ({ sessionId }) => ensureRemoteTank(sessionId));
+    multiplayerRoom.onMessage('player-left', ({ sessionId }) => {
+      const remote = remoteTanks.get(sessionId);
+      if (remote) scene.remove(remote.root);
+      remoteTanks.delete(sessionId);
+    });
+    multiplayerRoom.onMessage('player-pose', ({ sessionId, pose }) => applyRemotePose(sessionId, pose));
+    multiplayerRoom.onLeave(() => {
+      status.textContent = 'Disconnected from multiplayer';
+      multiplayerRoom = null;
+    });
+    status.textContent = `Online · room ${multiplayerRoom.roomId} · 1/4 players`;
+    multiplayerRoom.onMessage('room-count', ({ count }) => {
+      status.textContent = `Online · room ${multiplayerRoom.roomId} · ${count}/4 players`;
+    });
+    multiplayerRoom.send('request-room-count');
+  } catch (error) {
+    console.error('Multiplayer connection failed:', error);
+    status.textContent = 'Offline · start the multiplayer server and reload with ?multiplayer=1';
+  }
+}
+
+if (new URLSearchParams(location.search).has('multiplayer')) {
+  joinMultiplayerRoom();
+}
+
+// ============================================================
+// CAMERA OCCLUSION
+// ============================================================
+
+function clearCameraOcclusion() {
+  for (const mat of fadedMaterials) {
+    const original = materialDefaults.get(mat);
+    if (original) {
+      mat.transparent = original.transparent;
+      mat.depthWrite = original.depthWrite;
+      mat.needsUpdate = true;
+    }
+    setCameraFade(mat, new THREE.Vector3(), 0);
+    fadedMaterials.delete(mat);
+  }
+}
+
+function updateCameraOcclusion() {
+  if (!levelMeshes.length) return;
+
+  const target = position.clone().addScaledVector(normal, 0.7);
+  const direction = camera.position.clone().sub(target);
+  const distance = direction.length();
+  if (distance < 0.001) return;
+
+  raycaster.set(target, direction.normalize());
+  raycaster.far = distance - 0.35;
+
+  const hits = raycaster.intersectObjects(levelMeshes, true);
+  const shouldFade = new Set();
+  const obstructionPoint = hits.length ? hits[0].point : null;
+
+  // Restore materials that are no longer between the tank and camera.
+  for (const mat of fadedMaterials) {
+    if (hits.length) {
+      const hitMats = Array.isArray(hits[0].object.material)
+        ? hits[0].object.material : [hits[0].object.material];
+      if (hitMats.includes(mat)) continue;
+    }
+
+    const original = materialDefaults.get(mat);
+    if (original) {
+      mat.transparent = original.transparent;
+      mat.depthWrite = original.depthWrite;
+      mat.needsUpdate = true;
+    }
+    setCameraFade(mat, new THREE.Vector3(), 0);
+    fadedMaterials.delete(mat);
+  }
+
+  if (!hits.length || !obstructionPoint) return;
+
+  const hitMaterials = Array.isArray(hits[0].object.material)
+    ? hits[0].object.material : [hits[0].object.material];
+
+  for (const mat of hitMaterials) {
+    if (!mat || !cameraFadeMaterials.has(mat)) continue;
+
+    shouldFade.add(mat);
+    setCameraFade(mat, obstructionPoint, CAMERA_FADE_STRENGTH);
+
+    if (!mat.transparent || mat.depthWrite) {
+      mat.transparent = true;
+      mat.depthWrite = false;
+      mat.needsUpdate = true;
+    }
+    fadedMaterials.add(mat);
+  }
+}
+
+// ============================================================
+// WEAPONS / PROJECTILES / TARGET DAMAGE
+// ============================================================
+
+function setWeapon(weapon) {
+  selectedWeapon = weapon;
+  el('weapon').textContent = weapon === 'cannon'
+    ? 'Main cannon [1]' : 'Minigun [2]';
+  minigunAccumulator = 0;
+  stopMinigunAudio();
+  showMessage(weapon === 'cannon' ? 'Main cannon selected' : 'Minigun selected');
+}
+
+function playOneShot(audio) {
+  try {
+    audio.currentTime = 0;
+    const promise = audio.play();
+    if (promise && promise.catch) promise.catch(() => {});
+  } catch (_) {}
+}
+
+function startMinigunAudio() {
+  if (minigunAudio.paused) {
+    const promise = minigunAudio.play();
+    if (promise && promise.catch) promise.catch(() => {});
+  }
+}
+
+function stopMinigunAudio() {
+  minigunAudio.pause();
+  try { minigunAudio.currentTime = 0; } catch (_) {}
+}
+
+function startThrustAudio() {
+  if (thrustAudio.paused) {
+    const promise = thrustAudio.play();
+    if (promise && promise.catch) promise.catch(() => {});
+  }
+}
+
+function stopThrustAudio() {
+  thrustAudio.pause();
+  try { thrustAudio.currentTime = 0; } catch (_) {}
+}
+
+function startEngineAudio() {
+  if (!engineAudioContext) {
+    if (engineAudio.paused) {
+      const promise = engineAudio.play();
+      if (promise && promise.catch) promise.catch(() => {});
+    }
+    return;
+  }
+  if (engineSource || !engineBuffer) return;
+  engineAudioContext.resume().catch(() => {});
+  engineSource = engineAudioContext.createBufferSource();
+  engineSource.buffer = engineBuffer;
+  engineSource.loop = true;
+  engineSource.playbackRate.value = engineAudio.playbackRate;
+  engineSource.connect(engineGain);
+  engineSource.start();
+}
+
+function updateEngineAudio(dt) {
+  const attached = flightState === 'attached';
+  const speed = attached ? Math.hypot(forwardSpeed, strafeSpeed) : 0;
+  const normalized = THREE.MathUtils.clamp(speed / GROUND_BOOST_MAX_SPEED, 0, 1);
+  const targetRate = 0.75 + normalized * 0.9;
+  const targetVolume = attached ? 0.14 + normalized * 0.42 : 0;
+  const blend = 1 - Math.exp(-3.5 * dt);
+
+  const nextRate = engineAudio.playbackRate + (targetRate - engineAudio.playbackRate) * blend;
+  const currentVolume = engineGain ? engineGain.gain.value : engineAudio.volume;
+  const nextVolume = currentVolume + (targetVolume - currentVolume) * (1 - Math.exp(-4 * dt));
+  engineAudio.playbackRate = nextRate;
+  if (engineGain) engineGain.gain.value = nextVolume;
+  else engineAudio.volume = nextVolume;
+  if (engineSource) engineSource.playbackRate.value = nextRate;
+
+  if (attached && engineAudioUnlocked && !engineSource && (engineBuffer || !engineAudioContext)) startEngineAudio();
+}
+
+function spawnCollisionSparks(point, surfaceNormal, impactSpeed, flight = false) {
+  const count = flight
+    ? 22
+    : Math.min(COLLISION_SPARK_COUNT + Math.floor(impactSpeed * 1.5), 28);
+
+  for (let i = 0; i < count; i++) {
+    const life = 0.22 + Math.random() * 0.28;
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.022 + Math.random() * 0.018, 5, 4),
+      new THREE.MeshBasicMaterial({
+        color: Math.random() > 0.35 ? 0xffa13a : 0xffe6a3,
+        transparent: true,
+        opacity: 1,
+        toneMapped: false,
+        depthWrite: false
+      })
+    );
+    mesh.position.copy(point);
+    scene.add(mesh);
+
+    const direction = new THREE.Vector3(
+      Math.random() - 0.5,
+      Math.random() - 0.5,
+      Math.random() - 0.5
+    );
+    direction.addScaledVector(surfaceNormal, 1.1).normalize();
+
+    collisionSparks.push({
+      mesh,
+      velocity: direction.multiplyScalar((2 + Math.random() * 4) * (flight ? 1.35 : 1)),
+      life,
+      maxLife: life
+    });
+  }
+}
+
+function updateCollisionSparks(dt) {
+  for (let i = collisionSparks.length - 1; i >= 0; i--) {
+    const spark = collisionSparks[i];
+    spark.life -= dt;
+    spark.velocity.y -= 10 * dt;
+    spark.mesh.position.addScaledVector(spark.velocity, dt);
+    spark.mesh.material.opacity = Math.max(0, spark.life / spark.maxLife);
+
+    if (spark.life <= 0) {
+      scene.remove(spark.mesh);
+      spark.mesh.geometry.dispose();
+      spark.mesh.material.dispose();
+      collisionSparks.splice(i, 1);
+    }
+  }
+}
+
+function handleCollisionImpact(point, surfaceNormal, impactSpeed, flight = false) {
+  if (!flight && impactSpeed < DRIVE_COLLISION_THRESHOLD) return;
+  if (clock.elapsedTime - lastCollisionTime < COLLISION_COOLDOWN) return;
+
+  lastCollisionTime = clock.elapsedTime;
+  spawnCollisionSparks(point, surfaceNormal, impactSpeed, flight);
+  playOneShot(flight ? flightClunkAudio : collisionAudio);
+}
+
+function getMuzzleWorldPosition() {
+  tankRoot.updateMatrixWorld(true);
+
+  const source = muzzleMarker || gunGroup;
+  if (!source) {
+    return position.clone()
+      .addScaledVector(normal, ballRadius * 1.8)
+      .addScaledVector(heading, ballRadius * 0.8);
+  }
+
+  source.updateWorldMatrix(true, true);
+
+  const origin = new THREE.Vector3();
+  source.getWorldPosition(origin);
+
+  const forward = new THREE.Vector3(0, 0, MODEL_FORWARD_NEGATIVE_Z ? -1 : 1)
+    .transformDirection(source.matrixWorld)
+    .normalize();
+
+  if (muzzleMarker) {
+    return origin.addScaledVector(forward, 0.08);
+  }
+
+  const box = new THREE.Box3().setFromObject(gunGroup);
+  if (box.isEmpty()) {
+    return origin.addScaledVector(forward, 0.12);
+  }
+
+  const { min, max } = box;
+  let muzzlePoint = origin.clone();
+  let alongBarrel = -Infinity;
+
+  for (const x of [min.x, max.x]) {
+    for (const y of [min.y, max.y]) {
+      for (const z of [min.z, max.z]) {
+        const corner = new THREE.Vector3(x, y, z);
+        const dist = corner.clone().sub(origin).dot(forward);
+        if (dist > alongBarrel) {
+          alongBarrel = dist;
+          muzzlePoint.copy(corner);
+        }
+      }
+    }
+  }
+
+  return muzzlePoint.addScaledVector(forward, 0.12);
+}
+
+function getShotMuzzleAndDirection() {
+  camera.updateMatrixWorld(true);
+  updateTankTransform();
+
+  const cameraRay = new THREE.Raycaster();
+  cameraRay.setFromCamera(new THREE.Vector2(0, 0), camera);
+  cameraRay.far = MAX_SHOT_DISTANCE;
+
+  const cameraDirection = new THREE.Vector3();
+  camera.getWorldDirection(cameraDirection);
+
+  // Ignore anything between the camera and the far side of the tank.
+  const tankDepth = position.clone()
+    .sub(camera.position)
+    .dot(cameraDirection);
+
+  const ignoreDistance = tankDepth + ballRadius * 1.2;
+
+  const aimHits = cameraRay
+    .intersectObjects(levelMeshes, true)
+    .filter(hit => hit.distance > ignoreDistance);
+
+  const aimPoint = aimHits.length
+    ? aimHits[0].point.clone()
+    : camera.position.clone().addScaledVector(
+      cameraDirection,
+      MAX_SHOT_DISTANCE
+    );
+
+  const muzzle = getMuzzleWorldPosition();
+  const direction = aimPoint.clone().sub(muzzle).normalize();
+
+  return { muzzle, direction };
+}
+
+function getTankWorldVelocity() {
+  if (flightState === 'flying' || flightState === 'drifting') {
+    return flightVelocity.clone();
+  }
+
+  if (flightState === 'reattaching') {
+    return reattachVelocity.clone();
+  }
+
+  // Normal driving velocity while magnetically attached.
+  const right = new THREE.Vector3()
+    .crossVectors(heading, normal)
+    .normalize();
+
+  return heading.clone()
+    .multiplyScalar(forwardSpeed)
+    .addScaledVector(right, strafeSpeed);
+}
+
+function fireShot() {
+  if (!levelMeshes.length || flightState === 'reattaching') return;
+  if (selectedWeapon === 'cannon' && weaponCooldown > 0) return;
+
+  const { muzzle, direction } = getShotMuzzleAndDirection();
+  const isCannon = selectedWeapon === 'cannon';
+  const speed = isCannon ? CANNON_SPEED : MINIGUN_SPEED;
+  const projectileVelocity = direction
+  .multiplyScalar(speed)
+  .add(getTankWorldVelocity());
+  const radius = isCannon ? 0.22 : 0.075;
+  const color = isCannon ? 0xffa33a : 0xffe7a0;
+
+  const projectileMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(radius, isCannon ? 12 : 7, isCannon ? 8 : 5),
+    new THREE.MeshBasicMaterial({ color, toneMapped: false })
+  );
+  projectileMesh.position.copy(muzzle);
+  scene.add(projectileMesh);
+
+  const trailMaterial = new THREE.LineBasicMaterial({
+    color,
+    transparent: true,
+    opacity: isCannon ? 0.85 : 0.75,
+    depthWrite: false
+  });
+  const trailGeometry = new THREE.BufferGeometry().setFromPoints([muzzle, muzzle]);
+  const trail = new THREE.Line(trailGeometry, trailMaterial);
+  scene.add(trail);
+
+  projectiles.push({
+    kind: 'projectile',
+    weapon: selectedWeapon,
+    mesh: projectileMesh,
+    trail,
+    start: muzzle.clone(),
+    position: muzzle.clone(),
+    velocity: projectileVelocity,
+    damage: isCannon ? CANNON_DAMAGE : MINIGUN_DAMAGE,
+    life: MAX_SHOT_DISTANCE / Math.max(projectileVelocity.length(), 1) + 1,
+    radius
+  });
+
+  if (isCannon) {
+    weaponCooldown = CANNON_COOLDOWN;
+    playOneShot(cannonAudio);
+  }
+}
+
+function spawnImpact(point, color = 0xff8b35, size = 0.32) {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(size, 10, 7),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9 })
+  );
+  mesh.position.copy(point);
+  scene.add(mesh);
+  projectiles.push({ kind: 'effect', mesh, life: 0.28, maxLife: 0.28 });
+}
+
+function removeProjectile(projectile) {
+  scene.remove(projectile.mesh);
+  projectile.mesh.geometry.dispose();
+  projectile.mesh.material.dispose();
+  if (projectile.trail) {
+    scene.remove(projectile.trail);
+    projectile.trail.geometry.dispose();
+    projectile.trail.material.dispose();
+  }
+}
+
+function updateShots(dt) {
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const shot = projectiles[i];
+    shot.life -= dt;
+
+    if (shot.kind === 'effect') {
+      shot.mesh.material.opacity = Math.max(0, shot.life / shot.maxLife);
+      shot.mesh.scale.multiplyScalar(1 + dt * 1.8);
+    } else {
+      const previous = shot.position.clone();
+      shot.position.addScaledVector(shot.velocity, dt);
+      const segment = shot.position.clone().sub(previous);
+      const segmentLength = segment.length();
+
+      if (segmentLength > 0.0001) {
+        raycaster.set(previous, segment.normalize());
+        raycaster.far = segmentLength + shot.radius;
+        const hits = raycaster.intersectObjects(levelMeshes, true);
+
+        if (hits.length) {
+          const hit = hits[0];
+          const isCannon = shot.weapon === 'cannon';
+          damageTarget(hit.object, shot.damage);
+          spawnImpact(
+            hit.point,
+            isCannon ? 0xff7628 : 0xffd27a,
+            isCannon ? 0.55 : 0.2
+          );
+
+          if (isCannon) {
+            // Small splash damage makes a heavy shell feel distinct.
+            targets.forEach(target => {
+              if (target.destroyed || target.health <= 0) return;
+              const center = new THREE.Box3().setFromObject(target.root).getCenter(new THREE.Vector3());
+              const distance = center.distanceTo(hit.point);
+              if (distance > 0 && distance < 4.5 && target !== findTargetRecord(hit.object)) {
+                const splash = Math.round(CANNON_DAMAGE * (1 - distance / 4.5) * 0.45);
+                if (target.meshes.length) damageTarget(target.meshes[0], splash);
+              }
+            });
+          }
+
+          removeProjectile(shot);
+          projectiles.splice(i, 1);
+          continue;
+        }
+      }
+
+      shot.mesh.position.copy(shot.position);
+      shot.trail.geometry.setFromPoints([shot.start, shot.position]);
+      shot.trail.material.opacity = shot.weapon === 'cannon' ? 0.65 : 0.42;
+    }
+
+    if (shot.life <= 0) {
+      removeProjectile(shot);
+      projectiles.splice(i, 1);
+    }
+  }
+}
+
+// ============================================================
+// MAGNETIC DETACH / FREE FLIGHT / REATTACH
+// ============================================================
+let freeFallStarted = false;
+let freeFallElapsed = 0;
+let freeFallPreviousEase = 0;
+
+const driftTargetNormal = new THREE.Vector3(0, 1, 0);
+
+const FREE_FALL_DURATION = 3.5;
+const FREE_FALL_ACCEL = 14;
+function beginFreeFall() {
+  if (freeFallStarted) return;
+
+  freeFallStarted = true;
+  freeFallElapsed = 0;
+  freeFallPreviousEase = 0;
+
+  const nearest = findNearestSurface();
+
+  if (nearest) {
+    driftTargetNormal.copy(nearest.normal);
+  } else {
+    driftTargetNormal.copy(normal);
+  }
+
+  showMessage('THRUST EMPTY — FALLING — PRESS LEFT CTRL TO RE-ENGAGE');
+}
+
+function updateFreeFall(dt) {
+  freeFallElapsed += dt;
+
+  const progress = THREE.MathUtils.clamp(
+    freeFallElapsed / FREE_FALL_DURATION,
+    0,
+    1
+  );
+
+  // Ease-in: starts gently and progressively picks up speed.
+  const eased = progress * progress;
+  const easeStep = eased - freeFallPreviousEase;
+  freeFallPreviousEase = eased;
+
+  // Gradually rotate the underside toward the target surface.
+  const oldNormal = normal.clone();
+
+  normal.lerp(driftTargetNormal, easeStep).normalize();
+
+  const transport = new THREE.Quaternion()
+    .setFromUnitVectors(oldNormal, normal);
+
+  heading.applyQuaternion(transport)
+    .projectOnPlane(normal).normalize();
+
+  aimDirection.applyQuaternion(transport)
+    .projectOnPlane(normal).normalize();
+
+  // Build gravitational pull gradually.
+  flightVelocity.addScaledVector(
+    driftTargetNormal,
+    -FREE_FALL_ACCEL * eased * dt
+  );
+
+  // A little air resistance, without killing momentum.
+  flightVelocity.multiplyScalar(Math.exp(-0.08 * dt));
+
+  moveFlightWithCollision(dt);
+}
+
+function startFlight() {
+  if (!levelMeshes.length) return false;
+
+  // No thrust fuel left: cannot thrust again until landing.
+  if (thrustRemaining <= 0 && flightState !== 'attached') return false;
+
+  // Already thrusting.
+  if (flightState === 'flying') {
+    flightSpaceHeld = true;
+    return true;
+  }
+
+  if (flightState === 'attached') {
+    // Initialize the fuel reserve only when first detaching.
+    thrustRemaining = THRUST_DURATION;
+    freeFallStarted = false;
+
+    const initialDirection = getAimDirection();
+    flightAimDirection.copy(initialDirection).normalize();
+    flightAimUp.copy(normal).addScaledVector(
+      flightAimDirection,
+      -flightAimUp.dot(flightAimDirection)
+    );
+    if (flightAimUp.lengthSq() < 0.001) {
+      flightAimUp.set(0, 1, 0);
+      if (Math.abs(flightAimUp.dot(flightAimDirection)) > 0.95) flightAimUp.set(1, 0, 0);
+      flightAimUp.addScaledVector(flightAimDirection, -flightAimUp.dot(flightAimDirection));
+    }
+    flightAimUp.normalize();
+
+    flightVelocity.copy(normal)
+      .multiplyScalar(FLIGHT_PUSH_OFF)
+      .addScaledVector(initialDirection, FLIGHT_INITIAL_SPEED);
+
+    forwardSpeed = 0;
+    strafeSpeed = 0;
+    previousForwardSpeed = 0;
+    previousStrafeSpeed = 0;
+  } else if (flightState !== 'drifting' || freeFallStarted) {
+    return false;
+  }
+
+  // Resume thrust without resetting the remaining fuel.
+  flightState = 'flying';
+  flightSpaceHeld = true;
+  showMessage(`THRUST ENGAGED — ${thrustRemaining.toFixed(1)}s REMAINING`);
+  return true;
+}
+
+
+function beginReattach(playClank = true) {
+  if (flightState !== 'drifting' && flightState !== 'flying') return;
+
+  const nearest = findNearestSurface();
+
+  if (!nearest) {
+    showMessage('No surface in range — still drifting');
+    return;
+  }
+
+  flightState = 'reattaching';
+  flightSpaceHeld = false;
+  reattachPlayClank = playClank;
+
+  stopThrustAudio();
+
+  // The re-engagement sound belongs to contact, so play it when the
+  // reattachment animation actually reaches its target.
+
+  reattachNormal.copy(nearest.normal);
+
+  reattachTarget.copy(nearest.point)
+    .addScaledVector(reattachNormal, ballRadius + BALL_CLEARANCE);
+
+  reattachFromNormal.copy(normal);
+  reattachFromHeading.copy(heading);
+  reattachFromAim.copy(flightAimDirection);
+
+  reattachOrientQuat.setFromUnitVectors(
+    reattachFromNormal,
+    reattachNormal
+  );
+
+  reattachVelocity.copy(flightVelocity);
+
+  reattachElapsed = 0;
+  reattachOrientProgress = 0;
+
+  reattachStartDistance = Math.max(
+    position.distanceTo(reattachTarget),
+    0.01
+  );
+
+  showMessage('MAGNETS ENGAGING — RETURNING TO SURFACE');
+}
+function findNearestSurface() {
+  const directions = [];
+  for (const x of [-1, 0, 1]) {
+    for (const y of [-1, 0, 1]) {
+      for (const z of [-1, 0, 1]) {
+        if (x === 0 && y === 0 && z === 0) continue;
+        directions.push(new THREE.Vector3(x, y, z).normalize());
+      }
+    }
+  }
+
+  let best = null;
+  for (const direction of directions) {
+    raycaster.set(position, direction);
+    raycaster.near = 0.05;
+    raycaster.far = 2000;
+    const hits = raycaster.intersectObjects(levelMeshes, true);
+    if (!hits.length) continue;
+
+    const hit = hits[0];
+    if (!best || hit.distance < best.distance) {
+      const surfaceNormal = hit.normal
+        ? hit.normal.clone().normalize()
+        : hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
+      // On the inside of the level, the attachment normal points from the wall toward us.
+      if (surfaceNormal.dot(position.clone().sub(hit.point)) < 0) surfaceNormal.negate();
+      best = {
+        distance: hit.distance,
+        point: hit.point.clone(),
+        normal: surfaceNormal
+      };
+    }
+  }
+  return best;
+}
+
+function moveAttachedWithCollision(movement, dt) {
+  const displacement = movement.clone().multiplyScalar(dt);
+  const distance = displacement.length();
+  if (distance < 0.00001) return false;
+
+  const direction = displacement.clone().normalize();
+  raycaster.set(position, direction);
+  raycaster.near = 0;
+  raycaster.far = distance + ballRadius + BALL_CLEARANCE;
+
+  const hits = raycaster.intersectObjects(levelMeshes, true);
+  if (!hits.length) {
+    position.add(displacement);
+    return false;
+  }
+
+  const hit = hits[0];
+  let contactNormal = hit.normal
+    ? hit.normal.clone().normalize()
+    : hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
+
+  if (contactNormal.dot(direction) > 0) contactNormal.negate();
+
+  position.copy(hit.point).addScaledVector(
+    contactNormal,
+    ballRadius + BALL_CLEARANCE
+  );
+
+  // Remove only the component pushing into the obstacle; keep tangential motion.
+  const intoSurface = movement.dot(contactNormal);
+  const impactSpeed = Math.max(0, -intoSurface);
+  const slideVelocity = movement.clone();
+  if (intoSurface < 0) {
+    slideVelocity.addScaledVector(contactNormal, -intoSurface);
+  }
+
+  const right = new THREE.Vector3().crossVectors(heading, normal).normalize();
+  forwardSpeed = slideVelocity.dot(heading);
+  strafeSpeed = slideVelocity.dot(right);
+
+  handleCollisionImpact(hit.point, contactNormal, impactSpeed, false);
+  return true;
+}
+
+function moveFlightWithCollision(dt) {
+  const displacement = flightVelocity.clone().multiplyScalar(dt);
+  const distance = displacement.length();
+
+  if (distance < 0.00001) return false;
+
+  const direction = displacement.clone().normalize();
+
+  raycaster.set(position, direction);
+  raycaster.near = 0;
+  raycaster.far = distance + ballRadius + BALL_CLEARANCE;
+
+  const hits = raycaster.intersectObjects(levelMeshes, true);
+
+  if (!hits.length) {
+    position.add(displacement);
+    return false;
+  }
+
+  const hit = hits[0];
+
+  let contactNormal = hit.normal
+    ? hit.normal.clone().normalize()
+    : hit.face.normal.clone()
+        .transformDirection(hit.object.matrixWorld)
+        .normalize();
+
+  if (contactNormal.dot(direction) > 0) {
+    contactNormal.negate();
+  }
+
+  position.copy(hit.point).addScaledVector(
+    contactNormal,
+    ballRadius + BALL_CLEARANCE
+  );
+
+  const intoSurface = flightVelocity.dot(contactNormal);
+  const impactSpeed = Math.max(0, -intoSurface);
+
+  // Remove velocity pushing into the wall, but preserve sliding momentum.
+  if (intoSurface < 0) {
+    flightVelocity.addScaledVector(
+      contactNormal,
+      -intoSurface * 1.2
+    );
+  }
+
+  handleCollisionImpact(hit.point, contactNormal, impactSpeed, true);
+
+  // Still have thrust? Continue flying.
+  if (flightState === 'flying' && flightSpaceHeld && thrustRemaining > 0) {
+    return true;
+  }
+
+  // Thrust expired during this collision. Reattach immediately.
+  if (flightState === 'flying' && thrustRemaining <= 0) {
+    flightState = 'drifting';
+    flightSpaceHeld = false;
+    stopThrustAudio();
+    beginReattach(false);
+    return true;
+  }
+
+  // Released thrust and collided: automatically reattach.
+  beginReattach(false);
+  return true;
+}
+
+function makeSurfaceDirection(direction, fallback, surfaceNormal) {
+  direction.projectOnPlane(surfaceNormal);
+
+  if (direction.lengthSq() < 0.001 && fallback) {
+    direction.copy(fallback).projectOnPlane(surfaceNormal);
+  }
+
+  if (direction.lengthSq() < 0.001) {
+    const reference = Math.abs(surfaceNormal.y) < 0.9
+      ? new THREE.Vector3(0, 1, 0)
+      : new THREE.Vector3(1, 0, 0);
+
+    direction.crossVectors(reference, surfaceNormal);
+  }
+
+  return direction.normalize();
+}
+
+function updateReattachment(dt) {
+  const toTarget = reattachTarget.clone().sub(position);
+  const distance = toTarget.length();
+
+  reattachElapsed += dt;
+
+  // Orientation is now controlled by elapsed time, not travel distance.
+  const timeT = THREE.MathUtils.clamp(
+    reattachElapsed / REATTACH_ORIENT_DURATION,
+    0,
+    1
+  );
+
+  reattachOrientProgress = timeT;
+
+  // Smooth ease-in/ease-out rotation.
+  const orientT = timeT * timeT * (3 - 2 * timeT);
+
+  const transport = new THREE.Quaternion().slerpQuaternions(
+    new THREE.Quaternion(),
+    reattachOrientQuat,
+    orientT
+  );
+
+  normal.copy(reattachFromNormal)
+  .applyQuaternion(transport)
+  .normalize();
+
+heading.copy(reattachFromHeading)
+  .applyQuaternion(transport);
+
+makeSurfaceDirection(
+  heading,
+  reattachFromAim.clone().applyQuaternion(transport),
+  normal
+);
+
+aimDirection.copy(reattachFromAim)
+  .applyQuaternion(transport);
+
+makeSurfaceDirection(aimDirection, heading, normal);
+
+aimPitch *= Math.exp(-8 * dt);
+
+  // Movement toward the attachment point.
+  if (distance > 0.001) {
+    const direction = toTarget.normalize();
+    const close = 1 - THREE.MathUtils.clamp(distance / 2.4, 0, 1);
+    const pullT = THREE.MathUtils.clamp(reattachElapsed / 1.15, 0, 1);
+    const pullEase = pullT * pullT;
+
+    if (close > 0.45) {
+      position.lerp(
+        reattachTarget,
+        1 - Math.exp(-(10 + 22 * close) * dt)
+      );
+
+      reattachVelocity.multiplyScalar(
+        Math.exp(-(12 + 18 * close) * dt)
+      );
+    } else {
+      const accel = 4 + REATTACH_ACCEL * pullEase + 28 * pullEase * pullEase;
+
+      reattachVelocity.addScaledVector(direction, accel * dt);
+
+      const along = reattachVelocity.dot(direction);
+      const lateral = reattachVelocity.clone()
+        .addScaledVector(direction, -along);
+
+      reattachVelocity.addScaledVector(
+        lateral,
+        -Math.min(1, 16 * dt)
+      );
+
+      if (along < 0) {
+        reattachVelocity.addScaledVector(
+          direction,
+          -along * Math.min(1, 8 * dt)
+        );
+      }
+
+      const maxSpeed = 9 + 36 * pullEase;
+
+      if (reattachVelocity.length() > maxSpeed) {
+        reattachVelocity.setLength(maxSpeed);
+      }
+
+      const step = reattachVelocity.clone().multiplyScalar(dt);
+
+      if (step.length() >= distance) {
+        position.copy(reattachTarget);
+        reattachVelocity.set(0, 0, 0);
+      } else {
+        position.add(step);
+      }
+    }
+  }
+
+  // Once the orientation animation is complete, finish the attachment
+  // immediately. The old distance/speed checks could keep the tank in
+  // "Magnets engaging" long after it was visibly aligned.
+  const aligned = orientT >= 0.999;
+
+  if (aligned) {
+    position.copy(reattachTarget);
+    reattachVelocity.set(0, 0, 0);
+  }
+
+  if (aligned) {
+    // Keep the orientation transported throughout the reattachment animation.
+    // The saved pre-flight directions belong to the old surface; copying them
+    // here would undo the rotation and can leave the controls pointed the wrong way.
+    normal.copy(reattachNormal).normalize();
+
+    makeSurfaceDirection(heading, aimDirection, normal);
+    makeSurfaceDirection(aimDirection, heading, normal);
+
+    // Guard against a degenerate tangent if the target surface is unusual.
+    if (
+      !Number.isFinite(heading.x) ||
+      !Number.isFinite(heading.y) ||
+      !Number.isFinite(heading.z) ||
+      heading.lengthSq() < 0.001
+    ) {
+      heading.set(0, 0, -1);
+      makeSurfaceDirection(heading, null, normal);
+    }
+
+    if (
+      !Number.isFinite(aimDirection.x) ||
+      !Number.isFinite(aimDirection.y) ||
+      !Number.isFinite(aimDirection.z) ||
+      aimDirection.lengthSq() < 0.001
+    ) {
+      aimDirection.copy(heading);
+    }
+
+  aimPitch = 0;
+
+  flightVelocity.set(0, 0, 0);
+  reattachVelocity.set(0, 0, 0);
+
+  forwardSpeed = 0;
+  strafeSpeed = 0;
+  previousForwardSpeed = 0;
+  previousStrafeSpeed = 0;
+
+  flightSpaceHeld = false;
+  flightState = 'attached';
+
+  thrustRemaining = THRUST_DURATION;
+  freeFallStarted = false;
+    if (reattachPlayClank) playOneShot(flightClunkAudio);
+
+  // The initial collision/engagement clunk already played. Do not play a
+  // second clunk when the control state switches back to attached.
+  showMessage('Magnets reattached');
+}
+}
+
+// ============================================================
+// MOVEMENT AND PHYSICS
+// ============================================================
+
+function damp(value, amount, dt) {
+  return value * Math.exp(-amount * dt);
+}
+
+function update(dt) {
+  if (!levelMeshes.length || !ballMesh) return;
+
+  weaponCooldown = Math.max(0, weaponCooldown - dt);
+
+  // Existing one-second boost is only available while magnetically attached.
+  if (groundBoostRemaining > 0 && flightState === 'attached') {
+    groundBoostRemaining = Math.max(0, groundBoostRemaining - dt);
+    groundBoostClock += dt;
+    const fade = groundBoostRemaining / GROUND_BOOST_DURATION;
+    groundBoostWobbleYaw = Math.sin(groundBoostClock * GROUND_BOOST_WOBBLE_RATE) * GROUND_BOOST_AIM_WOBBLE * fade;
+    groundBoostWobblePitch = Math.sin(groundBoostClock * GROUND_BOOST_WOBBLE_RATE * 1.37 + 0.8) * GROUND_BOOST_AIM_WOBBLE * 0.75 * fade;
+  } else {
+    groundBoostRemaining = 0;
+    groundBoostWobbleYaw = 0;
+    groundBoostWobblePitch = 0;
+  }
+
+  const groundBoosting = groundBoostRemaining > 0;
+
+  if (flightState === 'attached') {
+    // Keep the movement and steering basis valid after every attachment.
+    normal.normalize();
+    makeSurfaceDirection(heading, aimDirection, normal);
+    makeSurfaceDirection(aimDirection, heading, normal);
+
+    const drive = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
+    const strafe = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
+
+    forwardSpeed += drive * DRIVE_ACCEL * (groundBoosting ? 1.8 : 1) * dt;
+    strafeSpeed += strafe * STRAFE_ACCEL * (groundBoosting ? 1.5 : 1) * dt;
+    forwardSpeed = damp(forwardSpeed, drive ? 0.35 : DRAG, dt);
+    strafeSpeed = damp(strafeSpeed, strafe ? 0.45 : DRAG * 1.15, dt);
+
+    const forwardLimit = groundBoosting ? GROUND_BOOST_MAX_SPEED : Math.max(MAX_SPEED, forwardSpeed);
+    forwardSpeed = THREE.MathUtils.clamp(forwardSpeed, -MAX_REVERSE_SPEED, forwardLimit);
+    strafeSpeed = THREE.MathUtils.clamp(strafeSpeed, -MAX_SPEED * 0.7, MAX_SPEED * 0.7);
+
+    const angleToAim = Math.atan2(
+      heading.clone().cross(aimDirection).dot(normal),
+      THREE.MathUtils.clamp(heading.dot(aimDirection), -1, 1)
+    );
+    const maxTurn = TURN_RATE * dt;
+    const turn = THREE.MathUtils.clamp(
+      angleToAim * (1 - Math.exp(-TURN_RESPONSE * dt)), -maxTurn, maxTurn
+    );
+    heading.applyAxisAngle(normal, turn).projectOnPlane(normal).normalize();
+
+    const forwardAccel = (forwardSpeed - previousForwardSpeed) / Math.max(dt, 0.0001);
+    const strafeAccel = (strafeSpeed - previousStrafeSpeed) / Math.max(dt, 0.0001);
+    previousForwardSpeed = forwardSpeed;
+    previousStrafeSpeed = strafeSpeed;
+
+    const desiredPitchLean = THREE.MathUtils.clamp(-forwardAccel * BODY_ACCEL_LEAN, -0.10, 0.10);
+    const desiredSideLean = THREE.MathUtils.clamp(
+      -turn / Math.max(dt, 0.0001) * BODY_TURN_LEAN - strafeAccel * BODY_ACCEL_LEAN * 0.65,
+      -0.16, 0.16
+    );
+    const blend = 1 - Math.exp(-BODY_LEAN_RESPONSE * dt);
+    const groundBoostFade = groundBoostRemaining / GROUND_BOOST_DURATION;
+    const groundBoostLeanPitch = groundBoosting
+      ? Math.sin(groundBoostClock * GROUND_BOOST_WOBBLE_RATE * 1.37) * 0.075 * groundBoostFade : 0;
+    const groundBoostLeanSide = groundBoosting
+      ? Math.sin(groundBoostClock * GROUND_BOOST_WOBBLE_RATE) * 0.11 * groundBoostFade : 0;
+    bodyPitchLean += (desiredPitchLean + groundBoostLeanPitch - bodyPitchLean) * blend;
+    bodySideLean += (desiredSideLean + groundBoostLeanSide - bodySideLean) * blend;
+
+    const right = new THREE.Vector3().crossVectors(heading, normal).normalize();
+    const movement = heading.clone().multiplyScalar(forwardSpeed)
+      .addScaledVector(right, strafeSpeed);
+    const distance = movement.length() * dt;
+
+    if (distance > 0.00001) {
+      const oldNormal = normal.clone();
+      const startPosition = position.clone();
+      const collided = moveAttachedWithCollision(movement, dt);
+
+      if (snapToSurface(12, dt)) {
+        unsupportedSurfaceTime = 0;
+        const transport = new THREE.Quaternion().setFromUnitVectors(oldNormal, normal);
+        heading.applyQuaternion(transport).projectOnPlane(normal).normalize();
+        aimDirection.applyQuaternion(transport).projectOnPlane(normal).normalize();
+
+        const actualDistance = position.distanceTo(startPosition);
+        if (!collided && actualDistance > 0.0001) {
+          const travelDirection = movement.clone().normalize();
+          const rollAxis = new THREE.Vector3().crossVectors(normal, travelDirection).normalize();
+          if (rollAxis.lengthSq() > 0.000001) {
+            const parentQuaternion = new THREE.Quaternion();
+            ballMesh.parent.getWorldQuaternion(parentQuaternion);
+            const localAxis = rollAxis.clone().applyQuaternion(parentQuaternion.invert()).normalize();
+            const rollQuaternion = new THREE.Quaternion().setFromAxisAngle(
+              localAxis, actualDistance / Math.max(ballRadius, 0.1)
+            );
+            ballMesh.quaternion.premultiply(rollQuaternion);
+          }
+        }
+      } else if (!collided) {
+        // Allow a brief support gap over seams, but fall once the tank has
+        // clearly left the platform. Keep the ground movement basis stable
+        // during this grace interval.
+        unsupportedSurfaceTime += dt;
+        if (unsupportedSurfaceTime >= 0.12) {
+          flightVelocity.copy(movement);
+          flightAimDirection.copy(movement).normalize();
+          flightAimUp.copy(normal);
+          flightState = 'drifting';
+          beginFreeFall();
+        }
+      }
+    }
+} else if (flightState === 'flying') {
+  // Fuel is consumed ONLY while Space is held.
+  thrustRemaining = Math.max(0, thrustRemaining - dt);
+
+  const thrustDirection = getAimDirection();
+
+  flightVelocity.addScaledVector(
+    thrustDirection,
+    THRUST_ACCELERATION * dt
+  );
+
+  flightVelocity.multiplyScalar(Math.exp(-FLIGHT_DRAG * dt));
+
+  const collided = moveFlightWithCollision(dt);
+
+  if (!collided) {
+    const tangentHeading = thrustDirection.clone().projectOnPlane(normal);
+    if (tangentHeading.lengthSq() > 0.001) {
+      heading.copy(tangentHeading.normalize());
+    }
+
+    if (thrustRemaining <= 0) {
+      flightState = 'drifting';
+      flightSpaceHeld = false;
+      stopThrustAudio();
+      //beginFreeFall();
+    }
+  }
+
+} else if (flightState === 'drifting') {
+  if (thrustRemaining <= 0) {
+    //updateFreeFall(dt);
+    stopThrustAudio();
+    flightVelocity.multiplyScalar(Math.exp(-0.08 * dt));
+    moveFlightWithCollision(dt);
+  } else {
+    // Released Space with fuel remaining: coast on existing momentum.
+    flightVelocity.multiplyScalar(Math.exp(-0.08 * dt));
+    moveFlightWithCollision(dt);
+  }
+
+} else if (flightState === 'reattaching') {
+  updateReattachment(dt);
+}
+
+  updateTankTransform();
+
+  // CAMERA: the camera tracks the current aiming vector in every movement mode.
+  const viewDirection = getAimDirection();
+  const airborneLook = flightState === 'flying' || flightState === 'drifting';
+  const cameraUpRate = flightState === 'reattaching' ? 10 : 0.75;
+  if (airborneLook) camera.up.copy(flightAimUp);
+  else camera.up.lerp(normal, 1 - Math.exp(-cameraUpRate * dt));
+
+  if (firstPerson) {
+    clearCameraOcclusion();
+    const fpPosition = position.clone().addScaledVector(normal, ballRadius * 1.65);
+    camera.position.lerp(fpPosition, 1 - Math.exp(-1.8 * dt));
+    const fpLookTarget = camera.position.clone().addScaledVector(viewDirection, 20);
+    cameraLookTarget.lerp(fpLookTarget, 1 - Math.exp(-2.0 * dt));
+    camera.lookAt(cameraLookTarget);
+  } else {
+    const cameraUp = airborneLook ? flightAimUp : normal;
+    // Follow the mouse-controlled look direction in both axes while keeping
+    // the camera centered laterally behind the vehicle.
+    const cameraForward = viewDirection;
+    const desiredCamera = position.clone()
+      .addScaledVector(cameraForward, -thirdPersonDistance)
+      .addScaledVector(cameraUp, CAMERA_HEIGHT * thirdPersonDistance / CAMERA_DISTANCE);
+    camera.position.lerp(desiredCamera, 1 - Math.exp(-1.25 * dt));
+    const aimTarget = position.clone()
+      .addScaledVector(normal, ballRadius * 1.15)
+      .addScaledVector(cameraForward, 12);
+    cameraLookTarget.lerp(aimTarget, 1 - Math.exp(-2.0 * dt));
+    camera.lookAt(cameraLookTarget);
+    updateCameraOcclusion();
+  }
+
+  if (thrusterMesh) {
+    // Only show the GLB thruster while Space is actively applying thrust.
+    thrusterMesh.visible = flightState === 'flying' && flightSpaceHeld;
+
+    if (thrusterBasePosition) thrusterMesh.position.copy(thrusterBasePosition);
+    if (thrusterBaseQuaternion) thrusterMesh.quaternion.copy(thrusterBaseQuaternion);
+    if (thrusterBaseScale) thrusterMesh.scale.copy(thrusterBaseScale);
+
+    if (thrusterMesh.visible && thrusterBasePosition) {
+      thrusterMesh.position.z += Math.sin(clock.elapsedTime * 55) * .1;
+    }
+  }
+
+  // Hold left mouse for continuous minigun fire. Cannon remains single-shot.
+  if (fireHeld && selectedWeapon === 'minigun') {
+    minigunAccumulator += dt;
+    startMinigunAudio();
+    while (minigunAccumulator >= MINIGUN_INTERVAL) {
+      fireShot();
+      minigunAccumulator -= MINIGUN_INTERVAL;
+    }
+  }
+
+  updateShots(dt);
+  updateCollisionSparks(dt);
+  updateEngineAudio(dt);
+
+  el('speed').textContent = flightState === 'attached'
+    ? Math.hypot(forwardSpeed, strafeSpeed).toFixed(1)
+    : ((flightState === 'flying' || flightState === 'drifting') ? flightVelocity.length() : reattachVelocity.length()).toFixed(1);
+  el('ground-boost').textContent = groundBoosting ? groundBoostRemaining.toFixed(1) + 's' : 'Ready';
+  el('flight').textContent = flightState === 'attached'
+    ? 'Magnetized'
+    : flightState === 'flying'
+      ? `Thrust ${thrustRemaining.toFixed(1)}s`
+      : flightState === 'drifting'
+        ? 'Free drift · Ctrl to attach'
+        : 'Magnets engaging';
+  el('surface').textContent =
+    `${normal.x.toFixed(1)}, ${normal.y.toFixed(1)}, ${normal.z.toFixed(1)}`;
+}
+
+// ============================================================
+// INPUT
+// ============================================================
+
+function setViewMode(fp) {
+
+  firstPerson = fp;
+  tankRoot.visible = !fp;
+
+  document.body.classList.toggle('first-person', fp);
+
+  el('view').textContent =
+    fp ? 'First person' : 'Third person';
+
+  showMessage(el('view').textContent);
+}
+
+let messageTimer;
+
+function showMessage(text) {
+
+  const msg = el('message');
+
+  msg.textContent = text;
+  msg.style.display = 'block';
+
+  clearTimeout(messageTimer);
+
+  messageTimer = setTimeout(() => {
+    msg.style.display = 'none';
+  }, 1500);
+}
+
+renderer.domElement.addEventListener('click', () => {
+  engineAudioUnlocked = true;
+  startEngineAudio();
+  if (!mouseCaptured) {
+    renderer.domElement.requestPointerLock();
+  }
+});
+
+renderer.domElement.addEventListener('wheel', event => {
+  if (firstPerson) return;
+  event.preventDefault();
+  const direction = Math.sign(event.deltaY);
+  thirdPersonDistance = THREE.MathUtils.clamp(
+    thirdPersonDistance + direction * CAMERA_DISTANCE_STEP,
+    CAMERA_MIN_DISTANCE,
+    CAMERA_MAX_DISTANCE
+  );
+}, { passive: false });
+
+function setZoom(active) {
+  rightMouseHeld = active;
+  camera.fov = active ? CAMERA_ZOOM_FOV : 65;
+  camera.updateProjectionMatrix();
+}
+
+renderer.domElement.addEventListener('mousedown', event => {
+  if (event.button === 2 && mouseCaptured) {
+    event.preventDefault();
+    setZoom(true);
+  }
+
+  if (event.button === 0 && mouseCaptured) {
+    fireHeld = true;
+    if (selectedWeapon === 'cannon') {
+      fireShot();
+    } else {
+      minigunAccumulator = MINIGUN_INTERVAL;
+      startMinigunAudio();
+    }
+  }
+});
+
+window.addEventListener('mouseup', event => {
+  if (event.button === 2) setZoom(false);
+
+  if (event.button === 0) {
+    fireHeld = false;
+    minigunAccumulator = 0;
+    stopMinigunAudio();
+  }
+});
+
+renderer.domElement.addEventListener('contextmenu', event => event.preventDefault());
+
+document.addEventListener('pointerlockchange', () => {
+
+  mouseCaptured =
+    document.pointerLockElement === renderer.domElement;
+
+  if (!mouseCaptured) {
+    fireHeld = false;
+    minigunAccumulator = 0;
+    stopMinigunAudio();
+    setZoom(false);
+  }
+  showMessage(
+    mouseCaptured
+      ? 'Mouse captured — ESC to release'
+      : 'Click to capture mouse'
+  );
+});
+
+document.addEventListener('mousemove', event => {
+
+  if (!mouseCaptured) return;
+
+  const yaw = -event.movementX * MOUSE_SENSITIVITY;
+  const pitch = -event.movementY * MOUSE_SENSITIVITY;
+
+  if (flightState === 'flying' || flightState === 'drifting') {
+    // Free-flight look: rotate the complete look frame, with no pitch clamp.
+    // Yaw around the current camera-up axis, then pitch around camera-right.
+    const yawRotation = new THREE.Quaternion()
+      .setFromAxisAngle(flightAimUp, yaw);
+    flightAimDirection.applyQuaternion(yawRotation).normalize();
+    flightAimUp.applyQuaternion(yawRotation).normalize();
+
+    const flightRight = new THREE.Vector3()
+      .crossVectors(flightAimDirection, flightAimUp)
+      .normalize();
+
+    if (flightRight.lengthSq() > 0.001) {
+      const pitchRotation = new THREE.Quaternion()
+        .setFromAxisAngle(flightRight, pitch);
+      flightAimDirection.applyQuaternion(pitchRotation).normalize();
+      flightAimUp.applyQuaternion(pitchRotation).normalize();
+    }
+  } else if (flightState === 'attached') {
+    // Surface mode stays constrained to the current magnetized surface.
+    aimDirection.applyAxisAngle(normal, yaw)
+      .projectOnPlane(normal).normalize();
+
+    aimPitch = THREE.MathUtils.clamp(
+      aimPitch + pitch,
+      -MAX_AIM_PITCH,
+      MAX_AIM_PITCH
+    );
+  }
+});
+
+window.addEventListener('keydown', event => {
+
+  if (event.code === 'Digit1' && !event.repeat) setWeapon('cannon');
+  if (event.code === 'Digit2' && !event.repeat) setWeapon('minigun');
+
+  if (event.code === 'Space' && !event.repeat) {
+    event.preventDefault();
+    if (startFlight()) startThrustAudio();
+  }
+
+  if (event.code === 'ControlLeft' && !event.repeat) {
+    event.preventDefault();
+    beginReattach();
+  }
+
+  if (event.code === 'KeyC' && !event.repeat) {
+    setViewMode(!firstPerson);
+  }
+
+  if (
+    (event.code === 'ShiftLeft' || event.code === 'ShiftRight') &&
+    !event.repeat &&
+    groundBoostRemaining <= 0 && flightState === 'attached'
+  ) {
+
+    groundBoostRemaining = GROUND_BOOST_DURATION;
+    groundBoostClock = 0;
+
+    forwardSpeed = Math.min(
+      GROUND_BOOST_MAX_SPEED,
+      forwardSpeed + GROUND_BOOST_IMPULSE
+    );
+  }
+
+  keys[event.code] = true;
+
+  if ([
+    'KeyW', 'KeyA', 'KeyS', 'KeyD',
+    'ShiftLeft', 'ShiftRight', 'Space', 'ControlLeft'
+  ].includes(event.code)) {
+    event.preventDefault();
+  }
+});
+
+window.addEventListener('keyup', event => {
+  keys[event.code] = false;
+  if (event.code === 'Space' && flightState === 'flying') {
+    flightSpaceHeld = false;
+    flightState = 'drifting';
+    
+    stopThrustAudio();
+  }
+});
+
+window.addEventListener('blur', () => {
+
+  Object.keys(keys).forEach(key => keys[key] = false);
+
+  groundBoostRemaining = 0;
+  groundBoostWobbleYaw = 0;
+  groundBoostWobblePitch = 0;
+  fireHeld = false;
+  stopMinigunAudio();
+  setZoom(false);
+  if (flightState === 'flying') {
+    // Losing focus cancels active thrust but leaves the tank drifting.
+    flightState = 'drifting';
+    flightSpaceHeld = false;
+  }
+});
+
+// ============================================================
+// RESIZE / MAIN LOOP
+// ============================================================
+
+window.addEventListener('resize', () => {
+
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+
+  renderer.setSize(innerWidth, innerHeight);
+
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+});
+
+function animate() {
+
+  requestAnimationFrame(animate);
+
+  const dt = Math.min(clock.getDelta(), 0.04);
+
+  update(dt);
+
+  updateRemoteTanks(dt);
+  if (multiplayerRoom) {
+    multiplayerSendAccumulator += dt;
+    if (multiplayerSendAccumulator >= 1 / 15 && ballMesh) {
+      multiplayerSendAccumulator = 0;
+      multiplayerRoom.send('pose', {
+        position: position.toArray(),
+        rotation: tankRoot.quaternion.toArray(),
+        bodyRotation: bodyGroup
+          ? [bodyGroup.rotation.x, bodyGroup.rotation.y, bodyGroup.rotation.z]
+          : [0, 0, 0]
+      });
+    }
+  }
+
+  renderer.render(scene, camera);
+}
+
+animate();
+
+</script>
+</body>
+</html>

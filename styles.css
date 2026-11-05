@@ -1,0 +1,100 @@
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #101722;
+  font-family: system-ui, sans-serif;
+}
+canvas { display: block; }
+
+#hud, #help {
+  position: fixed;
+  top: 16px;
+  z-index: 5;
+  color: white;
+  background: #101720dd;
+  border: 1px solid #ffffff30;
+  border-radius: 8px;
+  padding: 12px 15px;
+  font-size: 12px;
+  line-height: 1.7;
+  pointer-events: none;
+}
+#hud { left: 16px; min-width: 160px; }
+#help { right: 16px; }
+
+#crosshair {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  width: 24px;
+  height: 24px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 4;
+}
+#crosshair:before, #crosshair:after {
+  content: "";
+  position: absolute;
+  background: white;
+  box-shadow: 0 0 3px black;
+}
+#crosshair:before {
+  width: 1px; height: 20px;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+}
+#crosshair:after {
+  width: 20px; height: 1px;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+}
+#crosshair span {
+  position: absolute;
+  width: 4px; height: 4px;
+  border: 1px solid white;
+  border-radius: 50%;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+}
+body.first-person #crosshair {
+  width: 18px; height: 18px;
+}
+body.first-person #crosshair:before { height: 12px; }
+body.first-person #crosshair:after { width: 12px; }
+
+#message {
+  position: fixed;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: white;
+  background: #101720dd;
+  border: 1px solid #ffffff30;
+  border-radius: 6px;
+  padding: 10px 15px;
+  z-index: 6;
+  pointer-events: none;
+}
+#network-status {
+  display: none;
+  position: fixed;
+  left: 50%;
+  top: 16px;
+  transform: translateX(-50%);
+  z-index: 7;
+  padding: 8px 12px;
+  color: #d8f6df;
+  background: #101720e8;
+  border: 1px solid #ffffff30;
+  border-radius: 6px;
+  font-size: 12px;
+}
+#network-status.visible { display: block; }
+kbd {
+  border: 1px solid #ffffff55;
+  border-radius: 3px;
+  padding: 1px 5px;
+}
