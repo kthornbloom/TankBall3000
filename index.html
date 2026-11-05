@@ -137,6 +137,7 @@ const CANNON_AUDIO_URL = './assets/audio/primary-shot.flac';
 const MINIGUN_AUDIO_URL = './assets/audio/minigun.mp3';
 const COLLISION_AUDIO_URL = './assets/audio/thud.mp3';
 const FLIGHT_CLUNK_AUDIO_URL = './assets/audio/thud.mp3';
+const MAGNET_AUDIO_URL = './assets/audio/emp.mp3';
 const ENGINE_AUDIO_URL = './assets/audio/engine.ogg';
 const THRUST_AUDIO_URL = './assets/audio/boost.mp3';
 
@@ -197,25 +198,25 @@ const camera = new THREE.PerspectiveCamera(
 //   loadGltfModel();
 // });
 
-// Green-tinted ambient illumination
+// Brighter cool fill lifts the darkest surfaces while leaving direct shadows visible.
 const ambientLight = new THREE.HemisphereLight(
-  0xc8e8d0,
-  0x18251b,
-  1.4
+  0xe2f0ff,
+  0x2b3940,
+  .68
 );
 scene.add(ambientLight);
 
-// Soft green directional fill
-const greenFill = new THREE.DirectionalLight(0x9bc9a5, 0.5);
-greenFill.position.set(-15, 10, -10);
-scene.add(greenFill);
+// This broad fill does not cast a second shadow, so the central light keeps its definition.
+const directionalFill = new THREE.DirectionalLight(0xc0dcf5, 0.75);
+directionalFill.position.set(-15, 10, -10);
+scene.add(directionalFill);
 
 // Central white point light
 const centerLight = new THREE.PointLight(
   0xffffff,
   250,
   250,
-  1.4
+  20
 );
 
 centerLight.position.set(0, 0, 0);
@@ -298,6 +299,8 @@ let firstPerson = false;
 let thirdPersonDistance = CAMERA_DISTANCE;
 let mouseCaptured = false;
 let rightMouseHeld = false;
+let magnetsElement = null;
+let magnetsActive = true;
 
 let groundBoostRemaining = 0;
 let groundBoostClock = 0;
@@ -347,6 +350,9 @@ collisionAudio.volume = 0.45;
 const flightClunkAudio = new Audio(FLIGHT_CLUNK_AUDIO_URL);
 flightClunkAudio.preload = 'auto';
 flightClunkAudio.volume = 0.8;
+const magnetAudio = new Audio(MAGNET_AUDIO_URL);
+magnetAudio.preload = 'auto';
+magnetAudio.volume = 0.75;
 const engineAudio = new Audio(ENGINE_AUDIO_URL);
 engineAudio.preload = 'auto';
 engineAudio.loop = false; // Web Audio handles the engine loop without media-element loop gaps.
@@ -708,6 +714,10 @@ loader.load(TANK_URL, gltf => {
     if (obj.name === 'Body') bodyGroup = obj;
     if (obj.name === 'Gun') gunGroup = obj;
     if (obj.name === 'Muzzle') muzzleMarker = obj;
+    if (obj.name && obj.name.toLowerCase() === 'magnets') {
+      magnetsElement = obj;
+      magnetsElement.visible = magnetsActive;
+    }
 
     if (obj.name && obj.name.toLowerCase() === 'thruster') {
       thrusterMesh = obj;
@@ -722,6 +732,7 @@ loader.load(TANK_URL, gltf => {
   if (!ballMesh) console.warn('Missing Ball mesh');
   if (!bodyGroup) console.warn('Missing Body group');
   if (!gunGroup) console.warn('Missing Gun group');
+  if (!magnetsElement) console.warn('Missing magnets element');
 
   if (ballMesh) {
     const bounds = new THREE.Box3().setFromObject(ballMesh);
@@ -857,6 +868,10 @@ function attachRemoteModel(remote) {
   remote.body = null;
   model.traverse(object => {
     if (object.name === 'Body') remote.body = object;
+    if (object.name && object.name.toLowerCase() === 'magnets') {
+      remote.magnets = object;
+      object.visible = remote.magnetsActive;
+    }
   });
   remote.root.add(model);
 }
@@ -870,6 +885,8 @@ function ensureRemoteTank(sessionId) {
     remote = {
       root,
       body: null,
+      magnets: null,
+      magnetsActive: true,
       targetPosition: new THREE.Vector3(),
       targetRotation: new THREE.Quaternion(),
       targetBodyRotation: null,
@@ -896,6 +913,10 @@ function applyRemotePose(sessionId, pose, sequence = 0) {
   remote.targetRotation.fromArray(pose.rotation).normalize();
   if (Array.isArray(pose.bodyRotation) && pose.bodyRotation.every(Number.isFinite)) {
     remote.targetBodyRotation = pose.bodyRotation;
+  }
+  if (typeof pose.magnetsActive === 'boolean') {
+    remote.magnetsActive = pose.magnetsActive;
+    if (remote.magnets) remote.magnets.visible = pose.magnetsActive;
   }
   if (!remote.hasPose) {
     remote.root.position.copy(remote.targetPosition);
@@ -967,6 +988,7 @@ function localTankPose() {
   return {
     position: position.toArray(),
     rotation: tankRoot.quaternion.toArray(),
+    magnetsActive,
     bodyRotation: bodyGroup
       ? [bodyGroup.rotation.x, bodyGroup.rotation.y, bodyGroup.rotation.z]
       : [0, 0, 0]
@@ -1132,6 +1154,7 @@ function respawnLocalPlayer() {
   reattachVelocity.set(0, 0, 0);
   aimPitch = 0;
   flightState = 'attached';
+  setMagnetsActive(true);
   thrustRemaining = THRUST_DURATION;
   normal.set(0, 1, 0);
   heading.set(0, 0, -1);
@@ -1535,6 +1558,13 @@ function playOneShot(audio) {
     const promise = audio.play();
     if (promise && promise.catch) promise.catch(() => {});
   } catch (_) {}
+}
+
+function setMagnetsActive(active, playSound = true) {
+  if (magnetsActive === active) return;
+  magnetsActive = active;
+  if (magnetsElement) magnetsElement.visible = active;
+  if (playSound) playOneShot(magnetAudio);
 }
 
 function startMinigunAudio() {
@@ -2106,6 +2136,7 @@ function startFlight() {
 
   // Resume thrust without resetting the remaining fuel.
   flightState = 'flying';
+  setMagnetsActive(false);
   flightSpaceHeld = true;
   showMessage(`THRUST ENGAGED — ${thrustRemaining.toFixed(1)}s REMAINING`);
   return true;
@@ -2123,6 +2154,7 @@ function beginReattach(playClank = true) {
   }
 
   flightState = 'reattaching';
+  setMagnetsActive(true);
   flightSpaceHeld = false;
   reattachPlayClank = playClank;
 
