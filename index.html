@@ -49,6 +49,11 @@
   Tank integrity: <span id="tank-health">100%</span><br>
   Targets: <span id="targets">0 / 0 destroyed</span><br>
   Flight: <span id="flight">Magnetized</span><br>
+  <div id="flight-boost-meter" hidden>
+    <div class="boost-meter-label"><span>THRUST BOOST</span><span id="boost-time">3.0s</span></div>
+    <div class="boost-meter-track"><div id="boost-bar"></div></div>
+  </div>
+  <div id="mag-drive-hint" hidden><kbd>LEFT CTRL</kbd> Re-engage mag drive</div>
   Surface: <span id="surface">0, 1, 0</span>
 </div>
 
@@ -110,7 +115,7 @@ const MAX_AIM_PITCH = 1.48; // Approximately 85 degrees
 const TURN_RATE = 2.7;
 const TURN_RESPONSE = 5;
 
-const CAMERA_DISTANCE = 9.5;
+const CAMERA_DISTANCE = 8.5;
 const CAMERA_HEIGHT = 5.0;
 const CAMERA_MIN_DISTANCE = 4.5;
 const CAMERA_MAX_DISTANCE = 20;
@@ -202,21 +207,21 @@ const camera = new THREE.PerspectiveCamera(
 const ambientLight = new THREE.HemisphereLight(
   0xe2f0ff,
   0x2b3940,
-  .68
+  1.35
 );
 scene.add(ambientLight);
 
 // This broad fill does not cast a second shadow, so the central light keeps its definition.
-const directionalFill = new THREE.DirectionalLight(0xc0dcf5, 0.75);
+const directionalFill = new THREE.DirectionalLight(0xc0dcf5, 1.1);
 directionalFill.position.set(-15, 10, -10);
 scene.add(directionalFill);
 
 // Central white point light
 const centerLight = new THREE.PointLight(
   0xffffff,
+  650,
   250,
-  250,
-  20
+  2
 );
 
 centerLight.position.set(0, 0, 0);
@@ -245,6 +250,7 @@ scene.add(levelRoot, tankRoot);
 
 const loader = new GLTFLoader();
 const raycaster = new THREE.Raycaster();
+const surfaceNormalMatrix = new THREE.Matrix3();
 const clock = new THREE.Clock();
 
 const V = () => new THREE.Vector3();
@@ -346,13 +352,13 @@ minigunAudio.loop = true;
 minigunAudio.volume = 0.55;
 const collisionAudio = new Audio(COLLISION_AUDIO_URL);
 collisionAudio.preload = 'auto';
-collisionAudio.volume = 0.45;
+collisionAudio.volume = 0.8;
 const flightClunkAudio = new Audio(FLIGHT_CLUNK_AUDIO_URL);
 flightClunkAudio.preload = 'auto';
 flightClunkAudio.volume = 0.8;
 const magnetAudio = new Audio(MAGNET_AUDIO_URL);
 magnetAudio.preload = 'auto';
-magnetAudio.volume = 0.75;
+magnetAudio.volume = 0.28;
 const engineAudio = new Audio(ENGINE_AUDIO_URL);
 engineAudio.preload = 'auto';
 engineAudio.loop = false; // Web Audio handles the engine loop without media-element loop gaps.
@@ -647,11 +653,11 @@ function spawn() {
 function updateMenuCamera(dt) {
   menuOrbitElapsed += dt;
   const angle = menuOrbitElapsed * 0.12;
-  const radius = CAMERA_DISTANCE + 1.3;
+  const radius = CAMERA_DISTANCE * 0.78;
   camera.up.set(0, 1, 0);
   camera.position.set(
     position.x + Math.sin(angle) * radius,
-    position.y + CAMERA_HEIGHT * 0.85,
+    position.y + CAMERA_HEIGHT * 0.72,
     position.z + Math.cos(angle) * radius
   );
   camera.lookAt(position.clone().addScaledVector(normal, ballRadius * 0.75));
@@ -775,29 +781,29 @@ function snapToSurface(maxDistance = 2.5, dt = 0) {
   // support when its point remains close to the tank's ball.
   if (hit.point.distanceTo(position) > ballRadius + BALL_CLEARANCE + 0.75) return false;
 
-  let targetNormal = hit.normal
-    ? hit.normal.clone().normalize()
-    : hit.face.normal.clone()
-        .transformDirection(hit.object.matrixWorld)
-        .normalize();
+  const targetNormal = getWorldHitNormal(hit);
 
   if (targetNormal.dot(normal) < 0) {
     targetNormal.negate();
   }
 
-  if (dt > 0) {
-    normal.lerp(
-      targetNormal,
-      1 - Math.exp(-SURFACE_RESPONSE * dt)
-    ).normalize();
-  } else {
-    normal.copy(targetNormal);
-  }
+  const nextNormal = dt > 0
+    ? normal.clone().lerp(targetNormal, 1 - Math.exp(-SURFACE_RESPONSE * dt)).normalize()
+    : targetNormal;
+  const snappedPosition = hit.point.clone()
+    .addScaledVector(nextNormal, ballRadius + BALL_CLEARANCE);
+  if (snappedPosition.distanceTo(position) > ballRadius * 1.25 + 0.2) return false;
 
-  position.copy(hit.point)
-    .addScaledVector(normal, ballRadius + BALL_CLEARANCE);
+  normal.copy(nextNormal);
+  position.copy(snappedPosition);
 
   return true;
+}
+
+function getWorldHitNormal(hit) {
+  const normal = hit.normal ? hit.normal.clone() : hit.face.normal.clone();
+  surfaceNormalMatrix.getNormalMatrix(hit.object.matrixWorld);
+  return normal.applyMatrix3(surfaceNormalMatrix).normalize();
 }
 
 // ============================================================
@@ -2210,9 +2216,7 @@ function findNearestSurface() {
 
     const hit = hits[0];
     if (!best || hit.distance < best.distance) {
-      const surfaceNormal = hit.normal
-        ? hit.normal.clone().normalize()
-        : hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
+      const surfaceNormal = getWorldHitNormal(hit);
       // On the inside of the level, the attachment normal points from the wall toward us.
       if (surfaceNormal.dot(position.clone().sub(hit.point)) < 0) surfaceNormal.negate();
       best = {
@@ -2228,7 +2232,7 @@ function findNearestSurface() {
 function moveAttachedWithCollision(movement, dt) {
   const displacement = movement.clone().multiplyScalar(dt);
   const distance = displacement.length();
-  if (distance < 0.00001) return false;
+  if (distance < 0.00001) return null;
 
   const direction = displacement.clone().normalize();
   raycaster.set(position, direction);
@@ -2238,13 +2242,11 @@ function moveAttachedWithCollision(movement, dt) {
   const hits = raycaster.intersectObjects(levelMeshes, true);
   if (!hits.length) {
     position.add(displacement);
-    return false;
+    return null;
   }
 
   const hit = hits[0];
-  let contactNormal = hit.normal
-    ? hit.normal.clone().normalize()
-    : hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
+  const contactNormal = getWorldHitNormal(hit);
 
   if (contactNormal.dot(direction) > 0) contactNormal.negate();
 
@@ -2266,7 +2268,7 @@ function moveAttachedWithCollision(movement, dt) {
   strafeSpeed = slideVelocity.dot(right);
 
   handleCollisionImpact(hit.point, contactNormal, impactSpeed, false);
-  return true;
+  return { normal: contactNormal, point: hit.point.clone(), impactSpeed };
 }
 
 function moveFlightWithCollision(dt) {
@@ -2290,11 +2292,7 @@ function moveFlightWithCollision(dt) {
 
   const hit = hits[0];
 
-  let contactNormal = hit.normal
-    ? hit.normal.clone().normalize()
-    : hit.face.normal.clone()
-        .transformDirection(hit.object.matrixWorld)
-        .normalize();
+  const contactNormal = getWorldHitNormal(hit);
 
   if (contactNormal.dot(direction) > 0) {
     contactNormal.negate();
@@ -2532,6 +2530,8 @@ function update(dt) {
     return;
   }
   if (localTankHealth <= 0) {
+    el('flight-boost-meter').hidden = true;
+    el('mag-drive-hint').hidden = true;
     updateDestructionEffects(dt);
     updateShots(dt);
     updateCollisionSparks(dt);
@@ -2611,9 +2611,15 @@ function update(dt) {
     if (distance > 0.00001) {
       const oldNormal = normal.clone();
       const startPosition = position.clone();
-      const collided = moveAttachedWithCollision(movement, dt);
+      const collision = moveAttachedWithCollision(movement, dt);
+      const collided = collision !== null;
+      const blocksSurfaceTransition = collision && collision.normal.dot(oldNormal) < 0.15;
 
-      if (snapToSurface(12, dt)) {
+      // A steep face should stop the tank. Snapping support on that same frame
+      // can select a nearby floor and move the tank across the corner.
+      if (blocksSurfaceTransition) {
+        unsupportedSurfaceTime = 0;
+      } else if (snapToSurface(12, dt)) {
         unsupportedSurfaceTime = 0;
         const transport = new THREE.Quaternion().setFromUnitVectors(oldNormal, normal);
         heading.applyQuaternion(transport).projectOnPlane(normal).normalize();
@@ -2752,6 +2758,13 @@ function update(dt) {
   updateShots(dt);
   updateCollisionSparks(dt);
   updateEngineAudio(dt);
+
+  const airborne = flightState === 'flying' || flightState === 'drifting';
+  el('flight-boost-meter').hidden = !airborne;
+  el('mag-drive-hint').hidden = !airborne;
+  el('boost-bar').style.width = `${THREE.MathUtils.clamp(thrustRemaining / THRUST_DURATION, 0, 1) * 100}%`;
+  el('boost-time').textContent = `${thrustRemaining.toFixed(1)}s`;
+  el('flight-boost-meter').classList.toggle('depleted', thrustRemaining <= 0);
 
   el('speed').textContent = flightState === 'attached'
     ? Math.hypot(forwardSpeed, strafeSpeed).toFixed(1)

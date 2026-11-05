@@ -88,6 +88,34 @@ body.game-started #message { visibility: visible; }
 }
 #hud { left: 16px; min-width: 160px; }
 #help { right: 16px; }
+#flight-boost-meter { margin: 7px 0; }
+#flight-boost-meter[hidden], #mag-drive-hint[hidden] { display: none; }
+.boost-meter-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+  color: #bfe8ff;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .08em;
+}
+.boost-meter-track {
+  height: 9px;
+  overflow: hidden;
+  background: #05090dbb;
+  border: 1px solid #ffffff70;
+  border-radius: 99px;
+}
+#boost-bar {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, #42b8ff, #b3f2ff);
+  box-shadow: 0 0 8px #45baffb0;
+  transition: width 80ms linear;
+}
+#flight-boost-meter.depleted #boost-bar { background: #73818b; box-shadow: none; }
+#mag-drive-hint { margin-top: 5px; color: #ffd18e; font-size: 10px; font-weight: 700; }
 
 #crosshair {
   position: fixed;
