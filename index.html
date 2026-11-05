@@ -11,7 +11,7 @@
   "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
     "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
-    "@colyseus/sdk": "https://esm.sh/@colyseus/sdk@0.18"
+    "peerjs": "https://esm.sh/peerjs@1.5.5"
   }
 }
 </script>
@@ -49,6 +49,15 @@
 <div id="crosshair"><span></span></div>
 <div id="message">Click to capture mouse</div>
 <div id="network-status" aria-live="polite"></div>
+<section id="multiplayer-panel" aria-label="Online multiplayer">
+  <strong>FREE ONLINE TEST</strong>
+  <div class="multiplayer-controls">
+    <input id="room-code" type="text" maxlength="80" placeholder="Enter host code" autocomplete="off" spellcheck="false">
+    <button id="host-game" type="button">Host</button>
+    <button id="join-game" type="button">Join</button>
+  </div>
+  <button id="copy-room-code" type="button" hidden>Copy host code</button>
+</section>
 
 <script type="module">
 
@@ -232,9 +241,14 @@ let gunGroup = null;
 let muzzleMarker = null;
 let tankModelTemplate = null;
 const remoteTanks = new Map();
-let multiplayerRoom = null;
+let multiplayerPeer = null;
 let multiplayerSessionId = null;
+let multiplayerHost = false;
+let hostConnection = null;
+const peerConnections = new Map();
+const multiplayerPoses = new Map();
 let multiplayerSendAccumulator = 0;
+let multiplayerPoseSequence = 0;
 
 let levelMeshes = [];
 let ballRadius = 1;
@@ -779,8 +793,8 @@ function updateTankTransform() {
   }
 }
 
-// Remote tanks are visual replicas only in this first networking milestone.
-// The local browser still simulates movement; the server currently relays poses.
+// Remote tanks are visual replicas. Each player still simulates movement locally;
+// the room host relays poses between peers over WebRTC.
 function attachRemoteModel(remote) {
   if (!tankModelTemplate || remote.root.children.length) return;
   const model = tankModelTemplate.clone(true);
@@ -803,6 +817,8 @@ function ensureRemoteTank(sessionId) {
       targetPosition: new THREE.Vector3(),
       targetRotation: new THREE.Quaternion(),
       targetBodyRotation: null,
+      lastSequence: -1,
+      latestPose: null,
       hasPose: false
     };
     remoteTanks.set(sessionId, remote);
@@ -811,11 +827,14 @@ function ensureRemoteTank(sessionId) {
   return remote;
 }
 
-function applyRemotePose(sessionId, pose) {
+function applyRemotePose(sessionId, pose, sequence = 0) {
   if (!pose || !Array.isArray(pose.position) || !Array.isArray(pose.rotation)) return;
   if (![...pose.position, ...pose.rotation].every(Number.isFinite)) return;
   const remote = ensureRemoteTank(sessionId);
   if (!remote) return;
+  if (sequence <= remote.lastSequence) return;
+  remote.lastSequence = sequence;
+  remote.latestPose = pose;
   remote.targetPosition.fromArray(pose.position);
   remote.targetRotation.fromArray(pose.rotation).normalize();
   if (Array.isArray(pose.bodyRotation) && pose.bodyRotation.every(Number.isFinite)) {
@@ -843,41 +862,238 @@ function updateRemoteTanks(dt) {
   }
 }
 
-async function joinMultiplayerRoom() {
+function localTankPose() {
+  return {
+    position: position.toArray(),
+    rotation: tankRoot.quaternion.toArray(),
+    bodyRotation: bodyGroup
+      ? [bodyGroup.rotation.x, bodyGroup.rotation.y, bodyGroup.rotation.z]
+      : [0, 0, 0]
+  };
+}
+
+function setNetworkStatus(message) {
   const status = el('network-status');
-  status.textContent = 'Connecting to multiplayer…';
+  status.textContent = message;
   status.classList.add('visible');
-  try {
-    const { Client } = await import('@colyseus/sdk');
-    const endpoint = new URLSearchParams(location.search).get('server') || 'http://localhost:2567';
-    const client = new Client(endpoint);
-    multiplayerRoom = await client.joinOrCreate('battle');
-    multiplayerSessionId = multiplayerRoom.sessionId;
-    multiplayerRoom.onMessage('player-joined', ({ sessionId }) => ensureRemoteTank(sessionId));
-    multiplayerRoom.onMessage('player-left', ({ sessionId }) => {
-      const remote = remoteTanks.get(sessionId);
-      if (remote) scene.remove(remote.root);
-      remoteTanks.delete(sessionId);
-    });
-    multiplayerRoom.onMessage('player-pose', ({ sessionId, pose }) => applyRemotePose(sessionId, pose));
-    multiplayerRoom.onLeave(() => {
-      status.textContent = 'Disconnected from multiplayer';
-      multiplayerRoom = null;
-    });
-    status.textContent = `Online · room ${multiplayerRoom.roomId} · 1/4 players`;
-    multiplayerRoom.onMessage('room-count', ({ count }) => {
-      status.textContent = `Online · room ${multiplayerRoom.roomId} · ${count}/4 players`;
-    });
-    multiplayerRoom.send('request-room-count');
-  } catch (error) {
-    console.error('Multiplayer connection failed:', error);
-    status.textContent = 'Offline · start the multiplayer server and reload with ?multiplayer=1';
+}
+
+function updatePeerCount() {
+  const count = multiplayerHost ? peerConnections.size + 1 : null;
+  if (count !== null) {
+    setNetworkStatus(`Hosting · ${count}/4 players · code ${multiplayerSessionId}`);
+    for (const connection of peerConnections.values()) {
+      if (connection.open) connection.send({ type: 'room-count', count });
+    }
   }
 }
 
-if (new URLSearchParams(location.search).has('multiplayer')) {
-  joinMultiplayerRoom();
+function removeRemoteTank(sessionId) {
+  const remote = remoteTanks.get(sessionId);
+  if (remote) scene.remove(remote.root);
+  remoteTanks.delete(sessionId);
+  multiplayerPoses.delete(sessionId);
 }
+
+function handlePeerMessage(connection, message) {
+  if (!message || typeof message !== 'object') return;
+
+  if (message.type === 'pose' && multiplayerHost) {
+    const sequence = Number.isFinite(message.sequence) ? message.sequence : 0;
+    applyRemotePose(connection.peer, message.pose, sequence);
+    multiplayerPoses.set(connection.peer, { pose: message.pose, sequence });
+    for (const [peerId, recipient] of peerConnections) {
+      if (peerId !== connection.peer && recipient.open) {
+        recipient.send({
+          type: 'pose',
+          sessionId: connection.peer,
+          pose: message.pose,
+          sequence
+        });
+      }
+    }
+    return;
+  }
+
+  if (message.type === 'pose' && typeof message.sessionId === 'string') {
+    const sequence = Number.isFinite(message.sequence) ? message.sequence : 0;
+    applyRemotePose(message.sessionId, message.pose, sequence);
+    return;
+  }
+
+  if (message.type === 'room-count') {
+    setNetworkStatus(`Connected · ${message.count}/4 players`);
+  } else if (message.type === 'player-left' && typeof message.sessionId === 'string') {
+    removeRemoteTank(message.sessionId);
+  } else if (message.type === 'room-full') {
+    setNetworkStatus('That host is full (4/4 players)');
+    connection.close();
+    multiplayerPeer?.destroy();
+    multiplayerPeer = null;
+    multiplayerSessionId = null;
+    el('host-game').disabled = false;
+    el('join-game').disabled = false;
+  } else if (message.type === 'hello' && multiplayerHost) {
+    for (const [sessionId, state] of multiplayerPoses) {
+      connection.send({
+        type: 'pose',
+        sessionId,
+        pose: state.pose,
+        sequence: state.sequence
+      });
+    }
+    updatePeerCount();
+  }
+}
+
+function attachPeerConnection(connection, incoming = false) {
+  if (incoming && peerConnections.size >= 3) {
+    connection.on('open', () => {
+      connection.send({ type: 'room-full' });
+      connection.close();
+    });
+    return;
+  }
+
+  if (incoming) peerConnections.set(connection.peer, connection);
+  connection.on('data', message => handlePeerMessage(connection, message));
+  connection.on('open', () => {
+    peerConnections.set(connection.peer, connection);
+    if (multiplayerHost) {
+      multiplayerPoses.set(multiplayerSessionId, {
+        pose: localTankPose(), sequence: multiplayerPoseSequence
+      });
+      for (const [sessionId, state] of multiplayerPoses) {
+        connection.send({
+          type: 'pose', sessionId, pose: state.pose, sequence: state.sequence
+        });
+      }
+      updatePeerCount();
+    } else {
+      hostConnection = connection;
+      connection.send({ type: 'hello' });
+      setNetworkStatus('Connected to host · syncing tanks…');
+    }
+  });
+  connection.on('close', () => {
+    peerConnections.delete(connection.peer);
+    if (!multiplayerSessionId) return;
+    removeRemoteTank(connection.peer);
+    if (multiplayerHost) {
+      for (const recipient of peerConnections.values()) {
+        if (recipient.open) recipient.send({ type: 'player-left', sessionId: connection.peer });
+      }
+      updatePeerCount();
+    } else {
+      hostConnection = null;
+      for (const sessionId of [...remoteTanks.keys()]) removeRemoteTank(sessionId);
+      setNetworkStatus('Host disconnected');
+    }
+  });
+  connection.on('error', error => {
+    console.error('Peer connection error:', error);
+    setNetworkStatus('Connection trouble · try rejoining');
+  });
+}
+
+async function createPeer() {
+  const { Peer } = await import('peerjs');
+  return new Peer(undefined, {
+    config: {
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    }
+  });
+}
+
+async function hostMultiplayerGame() {
+  if (multiplayerPeer) return;
+  const hostButton = el('host-game');
+  const joinButton = el('join-game');
+  hostButton.disabled = true;
+  joinButton.disabled = true;
+  setNetworkStatus('Starting host…');
+  try {
+    const peer = await createPeer();
+    multiplayerPeer = peer;
+    multiplayerHost = true;
+    peer.on('open', id => {
+      multiplayerSessionId = id;
+      el('room-code').value = id;
+      el('copy-room-code').hidden = false;
+      multiplayerPoses.set(id, { pose: localTankPose(), sequence: 0 });
+      setNetworkStatus(`Hosting · 1/4 players · code ${id}`);
+    });
+    peer.on('connection', connection => attachPeerConnection(connection, true));
+    peer.on('error', error => {
+      console.error('PeerJS error:', error);
+      setNetworkStatus(`Could not host: ${error.type || error.message}`);
+      peer.destroy();
+      multiplayerPeer = null;
+      multiplayerSessionId = null;
+      hostButton.disabled = false;
+      joinButton.disabled = false;
+    });
+  } catch (error) {
+    console.error('Could not start PeerJS:', error);
+    setNetworkStatus('Could not load the free WebRTC connection service');
+    hostButton.disabled = false;
+    joinButton.disabled = false;
+  }
+}
+
+async function joinMultiplayerGame() {
+  if (multiplayerPeer) return;
+  const roomCode = el('room-code').value.trim();
+  if (!roomCode) {
+    setNetworkStatus('Enter the host code first');
+    return;
+  }
+  el('host-game').disabled = true;
+  el('join-game').disabled = true;
+  setNetworkStatus('Connecting to host…');
+  try {
+    const peer = await createPeer();
+    multiplayerPeer = peer;
+    multiplayerHost = false;
+    peer.on('open', id => {
+      multiplayerSessionId = id;
+      const connection = peer.connect(roomCode, {
+        reliable: false,
+        serialization: 'json'
+      });
+      attachPeerConnection(connection);
+    });
+    peer.on('error', error => {
+      console.error('PeerJS error:', error);
+      setNetworkStatus(`Could not join: ${error.type || error.message}`);
+      peer.destroy();
+      multiplayerPeer = null;
+      multiplayerSessionId = null;
+      el('host-game').disabled = false;
+      el('join-game').disabled = false;
+    });
+  } catch (error) {
+    console.error('Could not join PeerJS room:', error);
+    setNetworkStatus('Could not load the free WebRTC connection service');
+    el('host-game').disabled = false;
+    el('join-game').disabled = false;
+  }
+}
+
+el('host-game').addEventListener('click', hostMultiplayerGame);
+el('join-game').addEventListener('click', joinMultiplayerGame);
+el('copy-room-code').addEventListener('click', async () => {
+  const code = el('room-code').value;
+  try {
+    await navigator.clipboard.writeText(code);
+    setNetworkStatus('Host code copied · send it to your friends');
+  } catch {
+    el('room-code').select();
+    setNetworkStatus('Select and copy the host code to share it');
+  }
+});
+
+window.addEventListener('beforeunload', () => multiplayerPeer?.destroy());
 
 // ============================================================
 // CAMERA OCCLUSION
@@ -2291,17 +2507,22 @@ function animate() {
   update(dt);
 
   updateRemoteTanks(dt);
-  if (multiplayerRoom) {
+  if (multiplayerPeer && multiplayerSessionId) {
     multiplayerSendAccumulator += dt;
     if (multiplayerSendAccumulator >= 1 / 15 && ballMesh) {
       multiplayerSendAccumulator = 0;
-      multiplayerRoom.send('pose', {
-        position: position.toArray(),
-        rotation: tankRoot.quaternion.toArray(),
-        bodyRotation: bodyGroup
-          ? [bodyGroup.rotation.x, bodyGroup.rotation.y, bodyGroup.rotation.z]
-          : [0, 0, 0]
-      });
+      const pose = localTankPose();
+      const sequence = ++multiplayerPoseSequence;
+      if (multiplayerHost) {
+        multiplayerPoses.set(multiplayerSessionId, { pose, sequence });
+        for (const connection of peerConnections.values()) {
+          if (connection.open) {
+            connection.send({ type: 'pose', sessionId: multiplayerSessionId, pose, sequence });
+          }
+        }
+      } else if (hostConnection?.open) {
+        hostConnection.send({ type: 'pose', pose, sequence });
+      }
     }
   }
 

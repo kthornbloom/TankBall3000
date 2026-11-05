@@ -93,6 +93,43 @@ body.first-person #crosshair:after { width: 12px; }
   font-size: 12px;
 }
 #network-status.visible { display: block; }
+#multiplayer-panel {
+  position: fixed;
+  left: 16px;
+  bottom: 76px;
+  z-index: 8;
+  width: min(350px, calc(100vw - 32px));
+  padding: 11px 12px;
+  color: white;
+  background: #101720e8;
+  border: 1px solid #ffffff30;
+  border-radius: 8px;
+  font-size: 12px;
+}
+.multiplayer-controls {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+#room-code {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 8px;
+  color: white;
+  background: #ffffff12;
+  border: 1px solid #ffffff44;
+  border-radius: 4px;
+}
+#multiplayer-panel button {
+  padding: 7px 10px;
+  color: white;
+  background: #426b86;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+#multiplayer-panel button:disabled { opacity: 0.55; cursor: wait; }
+#copy-room-code { margin-top: 7px; }
 kbd {
   border: 1px solid #ffffff55;
   border-radius: 3px;

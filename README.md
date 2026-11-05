@@ -1,19 +1,15 @@
 This is a three.js based tank game. It is unique in that the tank rolls on one large omni-ball, "magnetically" attached to the walls. So it can drive up on walls, ceilings, etc. The player may also use a thrust system to launch the tank into the air, with 3 seconds of vectoring thrust. Afterwards they must re-engage magnetic systems (or bump into a wall) to re-attach and re-fill the thrust. So far, weapons include a primary tank round and a machine gun. 
 
-## Multiplayer prototype
+## Free online multiplayer prototype
 
-The first multiplayer slice uses Colyseus rooms with four seats. It relays player tank poses so multiple browser clients can see one another. Movement is still simulated on each client; this prototype is for validating the connection and shared view, not for competitive play.
+The browser game uses PeerJS and WebRTC for a temporary four-player host-and-join session. One player hosts and shares the code shown in the multiplayer panel; up to three friends enter that code. PeerJS Cloud is used for free signaling, while tank poses travel directly between browsers when their networks allow it. There are no player accounts, random matchmaking, or server-side movement checks yet. The host needs to stay connected, and some networks may need a TURN relay to connect.
 
-1. In `multiplayer`, run `npm install` once, then `npm run dev` to start the room server on port 2567.
-2. In the project root, serve the files over HTTP, for example with `python -m http.server 8000`.
-3. Open `http://localhost:8000/?multiplayer=1` in two browser windows. Each joins the same open room, up to four players.
+For local play, serve the project over HTTP with `python -m http.server 8000`, open `http://localhost:8000` in multiple browser windows, then use **Host** in one window and **Join** in the others.
 
-The client uses Colyseus' browser SDK from a CDN, matching the existing Three.js CDN setup. No account is needed for local development.
+The `multiplayer` folder retains the earlier Colyseus server scaffold for a later server-authoritative version; the current browser client does not require it.
 
 ## Public hosting
 
-The GitHub Pages workflow publishes the browser game from the `master` branch. It omits Blender source files and the unused 109 MB HDRI from the Pages artifact. The HDRI is also git-ignored because GitHub rejects individual files over 100 MB.
+The GitHub Pages workflow publishes the browser game from the `master` branch. It omits Blender source files and the unused 109 MB HDRI from the Pages artifact. The HDRI is git-ignored because GitHub blocks individual files over 100 MB.
 
-The multiplayer server needs a separate Node.js host. The `multiplayer` folder is configured for Colyseus Cloud. Connect the GitHub repository in Colyseus Cloud, set its root directory to `multiplayer/`, and deploy the `master` branch. Enable GitHub Pages with **Settings → Pages → GitHub Actions**. Once the server is deployed, open the Pages URL with `?multiplayer=1&server=https%3A%2F%2FYOUR-COLYSEUS-HOST` to join a public room.
-
-Both hosting services require account access. Colyseus Cloud is a managed paid hosting service; check its current plan and usage pricing before creating a server.
+Enable GitHub Pages with **Settings → Pages → GitHub Actions**. The Pages site is static; PeerJS Cloud handles the signaling needed to form a room. The free shared signaling service is suitable for playtesting, but has no production availability guarantee.
