@@ -19,6 +19,27 @@
 
 <body>
 
+<section id="start-screen" aria-label="Main menu">
+  <div class="start-card">
+    <div class="start-kicker">ARCADE TANK COMBAT</div>
+    <h1>TANKBALL <span>3000</span></h1>
+    <p>Pick a mode and roll out.</p>
+    <div id="menu-options">
+      <button id="menu-join" type="button">JOIN MATCH</button>
+      <button id="menu-host" type="button">HOST MATCH</button>
+      <button id="menu-freeplay" type="button">FREE PLAY</button>
+    </div>
+    <div id="join-form" hidden>
+      <label for="room-code">ENTER ROOM CODE</label>
+      <div class="join-controls">
+        <input id="room-code" type="text" maxlength="6" placeholder="6-character code" autocomplete="off" autocapitalize="characters" spellcheck="false">
+        <button id="join-game" type="button">JOIN</button>
+      </div>
+      <button id="back-to-menu" class="menu-back" type="button">BACK</button>
+    </div>
+  </div>
+</section>
+
 <div id="hud">
   <strong>BALL TANK</strong><br>
   View: <span id="view">Third person</span><br>
@@ -48,16 +69,14 @@
 </div>
 
 <div id="crosshair"><span></span></div>
-<div id="message">Click to capture mouse</div>
+<div id="message"></div>
 <div id="network-status" aria-live="polite"></div>
-<section id="multiplayer-panel" aria-label="Online multiplayer">
-  <strong>FREE ONLINE TEST</strong>
-  <div class="multiplayer-controls">
-    <input id="room-code" type="text" maxlength="6" placeholder="Enter 6-letter code" autocomplete="off" autocapitalize="characters" spellcheck="false">
-    <button id="host-game" type="button">Host</button>
-    <button id="join-game" type="button">Join</button>
+<section id="multiplayer-panel" aria-label="Online multiplayer" hidden>
+  <strong>SHARE THIS ROOM CODE</strong>
+  <div class="join-controls">
+    <output id="host-room-code"></output>
+    <button id="copy-room-code" type="button">COPY</button>
   </div>
-  <button id="copy-room-code" type="button" hidden>Copy host code</button>
 </section>
 
 <script type="module">
@@ -253,10 +272,14 @@ let multiplayerPoseSequence = 0;
 let multiplayerShotSequence = 0;
 let multiplayerContactSequence = 0;
 let localTankHealth = 100;
+let gameStarted = false;
+let menuOrbitElapsed = 0;
 const playerHealth = new Map();
 const playerContactTimes = new Map();
 const hostContactTimes = new Map();
 const remoteMinigunPlayers = new Set();
+const tankDestructions = new Map();
+const tankFragments = [];
 
 let levelMeshes = [];
 let ballRadius = 1;
@@ -615,6 +638,31 @@ function spawn() {
   cameraLookTarget.copy(position);
 }
 
+function updateMenuCamera(dt) {
+  menuOrbitElapsed += dt;
+  const angle = menuOrbitElapsed * 0.12;
+  const radius = CAMERA_DISTANCE + 1.3;
+  camera.up.set(0, 1, 0);
+  camera.position.set(
+    position.x + Math.sin(angle) * radius,
+    position.y + CAMERA_HEIGHT * 0.85,
+    position.z + Math.cos(angle) * radius
+  );
+  camera.lookAt(position.clone().addScaledVector(normal, ballRadius * 0.75));
+}
+
+function startGame(mode) {
+  if (gameStarted) return;
+  gameStarted = true;
+  document.body.classList.add('game-started');
+  el('start-screen').hidden = true;
+  el('multiplayer-panel').hidden = true;
+  engineAudioUnlocked = true;
+  startEngineAudio();
+  if (mode) setNetworkStatus(mode === 'freeplay' ? 'Free play' : mode === 'host' ? 'Starting host…' : 'Joining match…');
+  showMessage('Click to capture mouse');
+}
+
 loader.load(LEVEL_URL, gltf => {
   levelRoot.add(gltf.scene);
   configureImportedLights(gltf.scene);
@@ -854,11 +902,15 @@ function applyRemotePose(sessionId, pose, sequence = 0) {
     remote.root.quaternion.copy(remote.targetRotation);
     remote.hasPose = true;
   }
+  if (playerHealth.get(sessionId) === 0 && !tankDestructions.has(sessionId)) {
+    remote.health = 0;
+    createTankDestruction(sessionId, remote.root);
+  }
 }
 
 function updateRemoteTanks(dt) {
   for (const remote of remoteTanks.values()) {
-    if (!remote.hasPose) continue;
+    if (!remote.hasPose || remote.health <= 0) continue;
     const blend = 1 - Math.exp(-14 * dt);
     remote.root.position.lerp(remote.targetPosition, blend);
     remote.root.quaternion.slerp(remote.targetRotation, blend);
@@ -938,6 +990,7 @@ function updatePeerCount() {
 }
 
 function removeRemoteTank(sessionId) {
+  clearTankDestruction(sessionId);
   const remote = remoteTanks.get(sessionId);
   if (remote) scene.remove(remote.root);
   remoteTanks.delete(sessionId);
@@ -959,16 +1012,141 @@ function sendToHost(message) {
 }
 
 function updateTankHealth(sessionId, health) {
+  const previous = playerHealth.get(sessionId) ?? 100;
   const safeHealth = THREE.MathUtils.clamp(Number(health) || 0, 0, 100);
   playerHealth.set(sessionId, safeHealth);
   if (sessionId === multiplayerSessionId) {
     localTankHealth = safeHealth;
     el('tank-health').textContent = `${Math.ceil(safeHealth)}%`;
-    if (safeHealth <= 0) showMessage('TANK DESTROYED');
+    if (safeHealth <= 0 && previous > 0) destroyLocalPlayer();
   } else {
     const remote = remoteTanks.get(sessionId);
-    if (remote) remote.health = safeHealth;
+    if (remote) {
+      remote.health = safeHealth;
+      if (safeHealth <= 0 && previous > 0 && remote.hasPose) createTankDestruction(sessionId, remote.root);
+      else if (safeHealth > 0 && tankDestructions.has(sessionId)) clearTankDestruction(sessionId);
+    }
   }
+}
+
+function createTankDestruction(sessionId, root) {
+  if (tankDestructions.has(sessionId)) return;
+  root.updateWorldMatrix(true, true);
+  const fragments = [];
+  root.traverse(object => {
+    if (!object.isMesh || !object.visible) return;
+    const worldPosition = new THREE.Vector3();
+    const worldRotation = new THREE.Quaternion();
+    const worldScale = new THREE.Vector3();
+    object.matrixWorld.decompose(worldPosition, worldRotation, worldScale);
+    const materials = (Array.isArray(object.material) ? object.material : [object.material]).map(material => {
+      const fragmentMaterial = material.clone();
+      fragmentMaterial.transparent = true;
+      fragmentMaterial.depthWrite = false;
+      return { material: fragmentMaterial, opacity: material.opacity };
+    });
+    const fragment = new THREE.Mesh(
+      object.geometry,
+      materials.length > 1 ? materials.map(item => item.material) : materials[0].material
+    );
+    fragment.position.copy(worldPosition);
+    fragment.quaternion.copy(worldRotation);
+    fragment.scale.copy(worldScale);
+    scene.add(fragment);
+    const velocity = new THREE.Vector3(
+      (Math.random() - 0.5) * 11,
+      Math.random() * 8 + 1.5,
+      (Math.random() - 0.5) * 11
+    );
+    const spin = new THREE.Vector3(
+      (Math.random() - 0.5) * 12,
+      (Math.random() - 0.5) * 12,
+      (Math.random() - 0.5) * 12
+    );
+    const item = { sessionId, mesh: fragment, materials, velocity, spin, scale: worldScale, age: 0, life: 3.6 };
+    fragments.push(item);
+    tankFragments.push(item);
+  });
+  root.visible = false;
+  tankDestructions.set(sessionId, { root, fragments });
+}
+
+function clearTankDestruction(sessionId) {
+  const destruction = tankDestructions.get(sessionId);
+  if (!destruction) return;
+  for (let i = tankFragments.length - 1; i >= 0; i--) {
+    const fragment = tankFragments[i];
+    if (fragment.sessionId !== sessionId) continue;
+    scene.remove(fragment.mesh);
+    for (const item of fragment.materials) item.material.dispose();
+    tankFragments.splice(i, 1);
+  }
+  destruction.root.visible = true;
+  tankDestructions.delete(sessionId);
+}
+
+function updateDestructionEffects(dt) {
+  for (let i = tankFragments.length - 1; i >= 0; i--) {
+    const fragment = tankFragments[i];
+    fragment.age += dt;
+    fragment.velocity.y -= 5.5 * dt;
+    fragment.mesh.position.addScaledVector(fragment.velocity, dt);
+    fragment.mesh.rotation.x += fragment.spin.x * dt;
+    fragment.mesh.rotation.y += fragment.spin.y * dt;
+    fragment.mesh.rotation.z += fragment.spin.z * dt;
+    const fade = THREE.MathUtils.clamp(1 - fragment.age / fragment.life, 0, 1);
+    fragment.mesh.scale.copy(fragment.scale).multiplyScalar(fade);
+    for (const item of fragment.materials) item.material.opacity = item.opacity * fade;
+    if (fragment.age >= fragment.life) {
+      scene.remove(fragment.mesh);
+      for (const item of fragment.materials) item.material.dispose();
+      tankFragments.splice(i, 1);
+    }
+  }
+}
+
+function destroyLocalPlayer() {
+  createTankDestruction(multiplayerSessionId || 'local-player', tankRoot);
+  Object.keys(keys).forEach(key => keys[key] = false);
+  fireHeld = false;
+  if (document.pointerLockElement) document.exitPointerLock();
+  announceWeaponAudio(false);
+  stopMinigunAudio();
+  stopThrustAudio();
+  showMessage('TANK DESTROYED');
+  setTimeout(respawnLocalPlayer, 5000);
+}
+
+function respawnLocalPlayer() {
+  const sessionId = multiplayerSessionId || 'local-player';
+  forwardSpeed = 0;
+  strafeSpeed = 0;
+  previousForwardSpeed = 0;
+  previousStrafeSpeed = 0;
+  groundBoostRemaining = 0;
+  groundBoostClock = 0;
+  unsupportedSurfaceTime = 0;
+  flightSpaceHeld = false;
+  freeFallStarted = false;
+  flightVelocity.set(0, 0, 0);
+  reattachVelocity.set(0, 0, 0);
+  aimPitch = 0;
+  flightState = 'attached';
+  thrustRemaining = THRUST_DURATION;
+  normal.set(0, 1, 0);
+  heading.set(0, 0, -1);
+  aimDirection.copy(heading);
+  spawn();
+  clearTankDestruction(sessionId);
+  tankRoot.visible = !firstPerson;
+  localTankHealth = 100;
+  playerHealth.set(sessionId, 100);
+  el('tank-health').textContent = '100%';
+  if (multiplayerPeer) {
+    if (multiplayerHost) broadcastToPeers({ type: 'tank-health', sessionId, health: 100 });
+    else if (hostConnection?.open) hostConnection.send({ type: 'respawn' });
+  }
+  showMessage('TANK RESPAWNED');
 }
 
 function setRemoteMinigunAudio(sessionId, active) {
@@ -1081,8 +1259,10 @@ function handlePeerMessage(connection, message) {
     multiplayerPeer?.destroy();
     multiplayerPeer = null;
     multiplayerSessionId = null;
-    el('host-game').disabled = false;
     el('join-game').disabled = false;
+  } else if (message.type === 'respawn' && multiplayerHost) {
+    updateTankHealth(connection.peer, 100);
+    broadcastToPeers({ type: 'tank-health', sessionId: connection.peer, health: 100 });
   } else if (message.type === 'hello' && multiplayerHost) {
     for (const [sessionId, health] of playerHealth) {
       connection.send({ type: 'tank-health', sessionId, health });
@@ -1173,10 +1353,6 @@ async function createPeer(id) {
 
 async function hostMultiplayerGame() {
   if (multiplayerPeer) return;
-  const hostButton = el('host-game');
-  const joinButton = el('join-game');
-  hostButton.disabled = true;
-  joinButton.disabled = true;
   setNetworkStatus('Starting host…');
   try {
     const roomCode = generateRoomCode();
@@ -1186,8 +1362,8 @@ async function hostMultiplayerGame() {
     peer.on('open', id => {
       multiplayerSessionId = id;
       playerHealth.set(id, localTankHealth);
-      el('room-code').value = id;
-      el('copy-room-code').hidden = false;
+      el('host-room-code').textContent = id;
+      el('multiplayer-panel').hidden = false;
       multiplayerPoses.set(id, { pose: localTankPose(), sequence: 0 });
       setNetworkStatus(`Hosting · 1/4 players · code ${id}`);
     });
@@ -1198,14 +1374,10 @@ async function hostMultiplayerGame() {
       peer.destroy();
       multiplayerPeer = null;
       multiplayerSessionId = null;
-      hostButton.disabled = false;
-      joinButton.disabled = false;
     });
   } catch (error) {
     console.error('Could not start PeerJS:', error);
     setNetworkStatus('Could not load the free WebRTC connection service');
-    hostButton.disabled = false;
-    joinButton.disabled = false;
   }
 }
 
@@ -1214,9 +1386,10 @@ async function joinMultiplayerGame() {
   const roomCode = el('room-code').value.trim().toUpperCase();
   if (!roomCode) {
     setNetworkStatus('Enter the host code first');
+    el('room-code').focus();
     return;
   }
-  el('host-game').disabled = true;
+  startGame('join');
   el('join-game').disabled = true;
   setNetworkStatus('Connecting to host…');
   try {
@@ -1237,27 +1410,37 @@ async function joinMultiplayerGame() {
       peer.destroy();
       multiplayerPeer = null;
       multiplayerSessionId = null;
-      el('host-game').disabled = false;
       el('join-game').disabled = false;
     });
   } catch (error) {
     console.error('Could not join PeerJS room:', error);
     setNetworkStatus('Could not load the free WebRTC connection service');
-    el('host-game').disabled = false;
     el('join-game').disabled = false;
   }
 }
 
-el('host-game').addEventListener('click', hostMultiplayerGame);
+el('menu-join').addEventListener('click', () => {
+  el('menu-options').hidden = true;
+  el('join-form').hidden = false;
+  el('room-code').focus();
+});
+el('back-to-menu').addEventListener('click', () => {
+  el('join-form').hidden = true;
+  el('menu-options').hidden = false;
+});
+el('menu-host').addEventListener('click', () => {
+  startGame('host');
+  hostMultiplayerGame();
+});
+el('menu-freeplay').addEventListener('click', () => startGame('freeplay'));
 el('join-game').addEventListener('click', joinMultiplayerGame);
 el('copy-room-code').addEventListener('click', async () => {
-  const code = el('room-code').value;
+  const code = multiplayerSessionId || '';
   try {
     await navigator.clipboard.writeText(code);
     setNetworkStatus('Host code copied · send it to your friends');
   } catch {
-    el('room-code').select();
-    setNetworkStatus('Select and copy the host code to share it');
+    setNetworkStatus(`Copy this host code: ${code}`);
   }
 });
 
@@ -1736,14 +1919,14 @@ function updateShots(dt) {
         raycaster.far = segmentLength + shot.radius;
         let tankHit = null;
         if (multiplayerHost) {
-          if (shot.ownerId !== multiplayerSessionId && position.distanceTo(previous) <= ballRadius * 2 + segmentLength) {
+          if (localTankHealth > 0 && shot.ownerId !== multiplayerSessionId && position.distanceTo(previous) <= ballRadius * 2 + segmentLength) {
             const toTank = position.clone().sub(previous);
             const along = THREE.MathUtils.clamp(toTank.dot(raycaster.ray.direction), 0, raycaster.far);
             const closest = previous.clone().addScaledVector(raycaster.ray.direction, along);
             if (closest.distanceTo(position) < ballRadius + shot.radius) tankHit = { distance: along, point: closest, targetId: multiplayerSessionId };
           }
           for (const [sessionId, remote] of remoteTanks) {
-            if (sessionId === shot.ownerId || !remote.hasPose) continue;
+            if (sessionId === shot.ownerId || !remote.hasPose || remote.health <= 0) continue;
             const hits = raycaster.intersectObjects(remote.root.children, true);
             if (hits.length && (!tankHit || hits[0].distance < tankHit.distance)) {
               tankHit = { ...hits[0], targetId: sessionId };
@@ -2311,6 +2494,19 @@ function damp(value, amount, dt) {
 function update(dt) {
   if (!levelMeshes.length || !ballMesh) return;
 
+  if (!gameStarted) {
+    updateMenuCamera(dt);
+    updateDestructionEffects(dt);
+    return;
+  }
+  if (localTankHealth <= 0) {
+    updateDestructionEffects(dt);
+    updateShots(dt);
+    updateCollisionSparks(dt);
+    updateEngineAudio(dt);
+    return;
+  }
+
   weaponCooldown = Math.max(0, weaponCooldown - dt);
 
   // Existing one-second boost is only available while magnetically attached.
@@ -2574,6 +2770,7 @@ function showMessage(text) {
 }
 
 renderer.domElement.addEventListener('click', () => {
+  if (!gameStarted || localTankHealth <= 0) return;
   engineAudioUnlocked = true;
   startEngineAudio();
   if (!mouseCaptured) {
@@ -2642,9 +2839,11 @@ document.addEventListener('pointerlockchange', () => {
     setZoom(false);
   }
   showMessage(
-    mouseCaptured
-      ? 'Mouse captured — ESC to release'
-      : 'Click to capture mouse'
+    localTankHealth <= 0
+      ? 'TANK DESTROYED'
+      : mouseCaptured
+        ? 'Mouse captured — ESC to release'
+        : 'Click to capture mouse'
   );
 });
 
@@ -2687,6 +2886,7 @@ document.addEventListener('mousemove', event => {
 });
 
 window.addEventListener('keydown', event => {
+  if (!gameStarted || localTankHealth <= 0) return;
 
   if (event.code === 'Digit1' && !event.repeat) setWeapon('cannon');
   if (event.code === 'Digit2' && !event.repeat) setWeapon('minigun');
@@ -2732,6 +2932,7 @@ window.addEventListener('keydown', event => {
 
 window.addEventListener('keyup', event => {
   keys[event.code] = false;
+  if (!gameStarted) return;
   if (event.code === 'Space' && flightState === 'flying') {
     flightSpaceHeld = false;
     flightState = 'drifting';
