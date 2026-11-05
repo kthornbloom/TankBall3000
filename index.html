@@ -25,6 +25,7 @@
   Speed: <span id="speed">0</span><br>
   Ground boost: <span id="ground-boost">Ready</span><br>
   Weapon: <span id="weapon">Main cannon [1]</span><br>
+  Tank integrity: <span id="tank-health">100%</span><br>
   Targets: <span id="targets">0 / 0 destroyed</span><br>
   Flight: <span id="flight">Magnetized</span><br>
   Surface: <span id="surface">0, 1, 0</span>
@@ -52,7 +53,7 @@
 <section id="multiplayer-panel" aria-label="Online multiplayer">
   <strong>FREE ONLINE TEST</strong>
   <div class="multiplayer-controls">
-    <input id="room-code" type="text" maxlength="80" placeholder="Enter host code" autocomplete="off" spellcheck="false">
+    <input id="room-code" type="text" maxlength="6" placeholder="Enter 6-letter code" autocomplete="off" autocapitalize="characters" spellcheck="false">
     <button id="host-game" type="button">Host</button>
     <button id="join-game" type="button">Join</button>
   </div>
@@ -249,6 +250,13 @@ const peerConnections = new Map();
 const multiplayerPoses = new Map();
 let multiplayerSendAccumulator = 0;
 let multiplayerPoseSequence = 0;
+let multiplayerShotSequence = 0;
+let multiplayerContactSequence = 0;
+let localTankHealth = 100;
+const playerHealth = new Map();
+const playerContactTimes = new Map();
+const hostContactTimes = new Map();
+const remoteMinigunPlayers = new Set();
 
 let levelMeshes = [];
 let ballRadius = 1;
@@ -819,6 +827,7 @@ function ensureRemoteTank(sessionId) {
       targetBodyRotation: null,
       lastSequence: -1,
       latestPose: null,
+      health: 100,
       hasPose: false
     };
     remoteTanks.set(sessionId, remote);
@@ -862,6 +871,46 @@ function updateRemoteTanks(dt) {
   }
 }
 
+function resolveTankContacts() {
+  if (!multiplayerPeer || localTankHealth <= 0) return;
+  const now = clock.elapsedTime;
+  for (const [sessionId, remote] of remoteTanks) {
+    if (!remote.hasPose) continue;
+    const delta = position.clone().sub(remote.root.position);
+    const minimum = ballRadius * 1.9;
+    const distance = delta.length();
+    if (distance >= minimum) continue;
+    const contactNormal = distance > 0.001 ? delta.normalize() : heading.clone();
+    const penetration = minimum - distance;
+    position.addScaledVector(contactNormal, penetration + 0.01);
+    if (flightState === 'flying' || flightState === 'drifting') {
+      const inward = flightVelocity.dot(contactNormal);
+      if (inward < 0) flightVelocity.addScaledVector(contactNormal, -inward * 1.25);
+    } else {
+      const inward = heading.clone().multiplyScalar(forwardSpeed)
+        .addScaledVector(new THREE.Vector3().crossVectors(heading, normal).normalize(), strafeSpeed)
+        .dot(contactNormal);
+      if (inward < 0) {
+        forwardSpeed *= 0.55;
+        strafeSpeed *= 0.55;
+      }
+    }
+    updateTankTransform();
+    const pair = [multiplayerSessionId, sessionId].sort().join(':');
+    const impactSpeed = Math.max(0, getTankWorldVelocity().length());
+    if (impactSpeed > 1.5 && now - (playerContactTimes.get(pair) ?? -Infinity) > 0.35) {
+      playerContactTimes.set(pair, now);
+      const point = remote.root.position.clone().addScaledVector(contactNormal, ballRadius);
+      const contactId = `${multiplayerSessionId}:${++multiplayerContactSequence}`;
+      spawnCollisionSparks(point, contactNormal, impactSpeed, false);
+      playOneShot(collisionAudio);
+      const event = { type: 'contact', otherId: sessionId, contactId, point: point.toArray(), normal: contactNormal.toArray(), impactSpeed };
+      if (multiplayerHost) broadcastToPeers({ ...event, type: 'player-contact', sessionId: multiplayerSessionId });
+      else sendToHost(event);
+    }
+  }
+}
+
 function localTankPose() {
   return {
     position: position.toArray(),
@@ -893,10 +942,83 @@ function removeRemoteTank(sessionId) {
   if (remote) scene.remove(remote.root);
   remoteTanks.delete(sessionId);
   multiplayerPoses.delete(sessionId);
+  playerHealth.delete(sessionId);
+  remoteMinigunPlayers.delete(sessionId);
+  if (!remoteMinigunPlayers.size && !fireHeld) stopMinigunAudio();
+}
+
+function broadcastToPeers(message, exceptPeerId = null) {
+  for (const [peerId, connection] of peerConnections) {
+    if (peerId !== exceptPeerId && connection.open) connection.send(message);
+  }
+}
+
+function sendToHost(message) {
+  if (multiplayerHost) broadcastToPeers(message);
+  else if (hostConnection?.open) hostConnection.send(message);
+}
+
+function updateTankHealth(sessionId, health) {
+  const safeHealth = THREE.MathUtils.clamp(Number(health) || 0, 0, 100);
+  playerHealth.set(sessionId, safeHealth);
+  if (sessionId === multiplayerSessionId) {
+    localTankHealth = safeHealth;
+    el('tank-health').textContent = `${Math.ceil(safeHealth)}%`;
+    if (safeHealth <= 0) showMessage('TANK DESTROYED');
+  } else {
+    const remote = remoteTanks.get(sessionId);
+    if (remote) remote.health = safeHealth;
+  }
+}
+
+function setRemoteMinigunAudio(sessionId, active) {
+  if (active) {
+    remoteMinigunPlayers.add(sessionId);
+    startMinigunAudio();
+  } else {
+    remoteMinigunPlayers.delete(sessionId);
+    if (!remoteMinigunPlayers.size && !fireHeld) stopMinigunAudio();
+  }
+}
+
+function announceWeaponAudio(active) {
+  if (!multiplayerPeer || !multiplayerSessionId) return;
+  sendToHost({ type: 'weapon-audio', active });
+}
+
+function handleRemoteContact(message) {
+  if (message.sessionId === multiplayerSessionId || !Array.isArray(message.point) || !Array.isArray(message.normal)) return;
+  if (![...message.point, ...message.normal, message.impactSpeed].every(Number.isFinite)) return;
+  const key = message.contactId;
+  for (const [entry, time] of hostContactTimes) if (entry.startsWith('seen:') && clock.elapsedTime - time > 5) hostContactTimes.delete(entry);
+  if (typeof key === 'string' && hostContactTimes.has(`seen:${key}`)) return;
+  if (typeof key === 'string') hostContactTimes.set(`seen:${key}`, clock.elapsedTime);
+  const point = new THREE.Vector3().fromArray(message.point);
+  const contactNormal = new THREE.Vector3().fromArray(message.normal).normalize();
+  spawnCollisionSparks(point, contactNormal, message.impactSpeed, false);
+  playOneShot(collisionAudio);
 }
 
 function handlePeerMessage(connection, message) {
   if (!message || typeof message !== 'object') return;
+
+  if (message.type === 'fire' && multiplayerHost) {
+    acceptRemoteShot(connection.peer, message);
+    return;
+  }
+
+  if (message.type === 'weapon-audio' && multiplayerHost) {
+    setRemoteMinigunAudio(connection.peer, message.active === true);
+    broadcastToPeers({
+      type: 'weapon-audio', sessionId: connection.peer, active: message.active === true
+    }, connection.peer);
+    return;
+  }
+
+  if (message.type === 'contact' && multiplayerHost) {
+    relayRemoteContact(connection.peer, message);
+    return;
+  }
 
   if (message.type === 'pose' && multiplayerHost) {
     const sequence = Number.isFinite(message.sequence) ? message.sequence : 0;
@@ -921,6 +1043,34 @@ function handlePeerMessage(connection, message) {
     return;
   }
 
+  if (message.type === 'projectile-start') {
+    if (message.shot?.ownerId !== multiplayerSessionId) {
+      createProjectile(message.shot, false);
+      if (message.shot?.weapon === 'cannon') playOneShot(cannonAudio);
+    }
+    return;
+  }
+
+  if (message.type === 'projectile-end') {
+    finishRemoteProjectile(message);
+    return;
+  }
+
+  if (message.type === 'tank-health') {
+    updateTankHealth(message.sessionId, message.health);
+    return;
+  }
+
+  if (message.type === 'weapon-audio') {
+    setRemoteMinigunAudio(message.sessionId, message.active === true);
+    return;
+  }
+
+  if (message.type === 'player-contact') {
+    handleRemoteContact(message);
+    return;
+  }
+
   if (message.type === 'room-count') {
     setNetworkStatus(`Connected · ${message.count}/4 players`);
   } else if (message.type === 'player-left' && typeof message.sessionId === 'string') {
@@ -934,6 +1084,9 @@ function handlePeerMessage(connection, message) {
     el('host-game').disabled = false;
     el('join-game').disabled = false;
   } else if (message.type === 'hello' && multiplayerHost) {
+    for (const [sessionId, health] of playerHealth) {
+      connection.send({ type: 'tank-health', sessionId, health });
+    }
     for (const [sessionId, state] of multiplayerPoses) {
       connection.send({
         type: 'pose',
@@ -960,6 +1113,12 @@ function attachPeerConnection(connection, incoming = false) {
   connection.on('open', () => {
     peerConnections.set(connection.peer, connection);
     if (multiplayerHost) {
+      playerHealth.set(connection.peer, 100);
+      connection.send({ type: 'tank-health', sessionId: connection.peer, health: 100 });
+      connection.send({ type: 'tank-health', sessionId: multiplayerSessionId, health: localTankHealth });
+      for (const [peerId, health] of playerHealth) {
+        if (peerId !== connection.peer) connection.send({ type: 'tank-health', sessionId: peerId, health });
+      }
       multiplayerPoses.set(multiplayerSessionId, {
         pose: localTankPose(), sequence: multiplayerPoseSequence
       });
@@ -996,9 +1155,16 @@ function attachPeerConnection(connection, incoming = false) {
   });
 }
 
-async function createPeer() {
+function generateRoomCode() {
+  const alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const values = new Uint8Array(6);
+  crypto.getRandomValues(values);
+  return [...values].map(value => alphabet[value % alphabet.length]).join('');
+}
+
+async function createPeer(id) {
   const { Peer } = await import('peerjs');
-  return new Peer(undefined, {
+  return new Peer(id, {
     config: {
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
     }
@@ -1013,11 +1179,13 @@ async function hostMultiplayerGame() {
   joinButton.disabled = true;
   setNetworkStatus('Starting host…');
   try {
-    const peer = await createPeer();
+    const roomCode = generateRoomCode();
+    const peer = await createPeer(roomCode);
     multiplayerPeer = peer;
     multiplayerHost = true;
     peer.on('open', id => {
       multiplayerSessionId = id;
+      playerHealth.set(id, localTankHealth);
       el('room-code').value = id;
       el('copy-room-code').hidden = false;
       multiplayerPoses.set(id, { pose: localTankPose(), sequence: 0 });
@@ -1043,7 +1211,7 @@ async function hostMultiplayerGame() {
 
 async function joinMultiplayerGame() {
   if (multiplayerPeer) return;
-  const roomCode = el('room-code').value.trim();
+  const roomCode = el('room-code').value.trim().toUpperCase();
   if (!roomCode) {
     setNetworkStatus('Enter the host code first');
     return;
@@ -1058,7 +1226,7 @@ async function joinMultiplayerGame() {
     peer.on('open', id => {
       multiplayerSessionId = id;
       const connection = peer.connect(roomCode, {
-        reliable: false,
+        reliable: true,
         serialization: 'json'
       });
       attachPeerConnection(connection);
@@ -1194,6 +1362,7 @@ function startMinigunAudio() {
 }
 
 function stopMinigunAudio() {
+  if (remoteMinigunPlayers.size && !fireHeld) return;
   minigunAudio.pause();
   try { minigunAudio.currentTime = 0; } catch (_) {}
 }
@@ -1412,7 +1581,7 @@ function getTankWorldVelocity() {
 }
 
 function fireShot() {
-  if (!levelMeshes.length || flightState === 'reattaching') return;
+  if (!levelMeshes.length || flightState === 'reattaching' || localTankHealth <= 0) return;
   if (selectedWeapon === 'cannon' && weaponCooldown > 0) return;
 
   const { muzzle, direction } = getShotMuzzleAndDirection();
@@ -1421,9 +1590,37 @@ function fireShot() {
   const projectileVelocity = direction
   .multiplyScalar(speed)
   .add(getTankWorldVelocity());
+  const shot = {
+    shotId: multiplayerPeer ? `${multiplayerSessionId}:${++multiplayerShotSequence}` : null,
+    ownerId: multiplayerSessionId || 'solo',
+    weapon: selectedWeapon,
+    muzzle: muzzle.toArray(),
+    velocity: projectileVelocity.toArray()
+  };
+  const authoritative = !multiplayerPeer || multiplayerHost;
+  createProjectile(shot, authoritative);
+
+  if (multiplayerPeer) {
+    if (multiplayerHost) broadcastToPeers({ type: 'projectile-start', shot });
+    else sendToHost({ type: 'fire', shot });
+  }
+
+  if (isCannon) {
+    weaponCooldown = CANNON_COOLDOWN;
+    playOneShot(cannonAudio);
+  }
+}
+
+function createProjectile(shot, authoritative = false) {
+  if (!shot || !Array.isArray(shot.muzzle) || !Array.isArray(shot.velocity) ||
+      ![...shot.muzzle, ...shot.velocity].every(Number.isFinite)) return null;
+  const weapon = shot.weapon === 'cannon' ? 'cannon' : 'minigun';
+  const muzzle = new THREE.Vector3().fromArray(shot.muzzle);
+  const projectileVelocity = new THREE.Vector3().fromArray(shot.velocity);
+  if (projectileVelocity.lengthSq() < 1) return null;
+  const isCannon = weapon === 'cannon';
   const radius = isCannon ? 0.22 : 0.075;
   const color = isCannon ? 0xffa33a : 0xffe7a0;
-
   const projectileMesh = new THREE.Mesh(
     new THREE.SphereGeometry(radius, isCannon ? 12 : 7, isCannon ? 8 : 5),
     new THREE.MeshBasicMaterial({ color, toneMapped: false })
@@ -1443,7 +1640,11 @@ function fireShot() {
 
   projectiles.push({
     kind: 'projectile',
-    weapon: selectedWeapon,
+    weapon,
+    shotId: shot.shotId || null,
+    ownerId: shot.ownerId || 'unknown',
+    authoritative,
+    networked: !!shot.shotId,
     mesh: projectileMesh,
     trail,
     start: muzzle.clone(),
@@ -1453,11 +1654,46 @@ function fireShot() {
     life: MAX_SHOT_DISTANCE / Math.max(projectileVelocity.length(), 1) + 1,
     radius
   });
+  return projectiles[projectiles.length - 1];
+}
 
-  if (isCannon) {
-    weaponCooldown = CANNON_COOLDOWN;
-    playOneShot(cannonAudio);
+function acceptRemoteShot(sessionId, message) {
+  const shot = message.shot;
+  if (!shot || typeof shot.shotId !== 'string' || !shot.shotId.startsWith(`${sessionId}:`)) return;
+  if (projectiles.some(projectile => projectile.shotId === shot.shotId)) return;
+  shot.ownerId = sessionId;
+  const projectile = createProjectile(shot, true);
+  if (!projectile) return;
+  broadcastToPeers({ type: 'projectile-start', shot }, sessionId);
+}
+
+function finishRemoteProjectile(message) {
+  const shotIndex = projectiles.findIndex(projectile => projectile.kind === 'projectile' && projectile.shotId === message.shotId);
+  if (shotIndex >= 0) {
+    removeProjectile(projectiles[shotIndex]);
+    projectiles.splice(shotIndex, 1);
   }
+  if (typeof message.targetId === 'string' && Number.isFinite(message.health)) {
+    updateTankHealth(message.targetId, message.health);
+    if (message.targetId === multiplayerSessionId && localTankHealth > 0) showMessage('TANK HIT');
+  }
+  if (Array.isArray(message.point) && message.point.every(Number.isFinite)) {
+    const isCannon = message.weapon === 'cannon';
+    spawnImpact(new THREE.Vector3().fromArray(message.point), isCannon ? 0xff7628 : 0xffd27a, isCannon ? 0.55 : 0.2);
+  }
+}
+
+function relayRemoteContact(sessionId, message) {
+  if (typeof message.otherId !== 'string' || !Array.isArray(message.point) || !Array.isArray(message.normal) ||
+      ![...message.point, ...message.normal, message.impactSpeed].every(Number.isFinite)) return;
+  const now = clock.elapsedTime;
+  for (const [key, time] of hostContactTimes) if (now - time > 5) hostContactTimes.delete(key);
+  const pair = [sessionId, message.otherId].sort().join(':');
+  if (now - (hostContactTimes.get(pair) ?? -Infinity) < 0.35) return;
+  hostContactTimes.set(pair, now);
+  const event = { ...message, sessionId, contactId: `${sessionId}:${message.contactId || now}` };
+  handleRemoteContact(event);
+  broadcastToPeers({ ...event, type: 'player-contact' }, sessionId);
 }
 
 function spawnImpact(point, color = 0xff8b35, size = 0.32) {
@@ -1495,22 +1731,50 @@ function updateShots(dt) {
       const segment = shot.position.clone().sub(previous);
       const segmentLength = segment.length();
 
-      if (segmentLength > 0.0001) {
+      if (shot.authoritative && segmentLength > 0.0001) {
         raycaster.set(previous, segment.normalize());
         raycaster.far = segmentLength + shot.radius;
+        let tankHit = null;
+        if (multiplayerHost) {
+          if (shot.ownerId !== multiplayerSessionId && position.distanceTo(previous) <= ballRadius * 2 + segmentLength) {
+            const toTank = position.clone().sub(previous);
+            const along = THREE.MathUtils.clamp(toTank.dot(raycaster.ray.direction), 0, raycaster.far);
+            const closest = previous.clone().addScaledVector(raycaster.ray.direction, along);
+            if (closest.distanceTo(position) < ballRadius + shot.radius) tankHit = { distance: along, point: closest, targetId: multiplayerSessionId };
+          }
+          for (const [sessionId, remote] of remoteTanks) {
+            if (sessionId === shot.ownerId || !remote.hasPose) continue;
+            const hits = raycaster.intersectObjects(remote.root.children, true);
+            if (hits.length && (!tankHit || hits[0].distance < tankHit.distance)) {
+              tankHit = { ...hits[0], targetId: sessionId };
+            }
+          }
+        }
         const hits = raycaster.intersectObjects(levelMeshes, true);
+        const worldHit = hits.length ? hits[0] : null;
 
-        if (hits.length) {
-          const hit = hits[0];
+        if (tankHit && (!worldHit || tankHit.distance < worldHit.distance)) {
+          const health = Math.max(0, (playerHealth.get(tankHit.targetId) ?? 100) - shot.damage);
+          updateTankHealth(tankHit.targetId, health);
+          if (multiplayerHost) broadcastToPeers({ type: 'tank-health', sessionId: tankHit.targetId, health });
+          spawnImpact(tankHit.point, 0xff4a35, shot.weapon === 'cannon' ? 0.65 : 0.24);
+          if (shot.networked && multiplayerHost) broadcastToPeers({ type: 'projectile-end', shotId: shot.shotId, weapon: shot.weapon, targetId: tankHit.targetId, health, point: tankHit.point.toArray() });
+          removeProjectile(shot);
+          projectiles.splice(i, 1);
+          continue;
+        }
+
+        if (worldHit) {
+          const hit = worldHit;
           const isCannon = shot.weapon === 'cannon';
-          damageTarget(hit.object, shot.damage);
+          if (shot.ownerId === multiplayerSessionId || !multiplayerHost) damageTarget(hit.object, shot.damage);
           spawnImpact(
             hit.point,
             isCannon ? 0xff7628 : 0xffd27a,
             isCannon ? 0.55 : 0.2
           );
 
-          if (isCannon) {
+          if (isCannon && (shot.ownerId === multiplayerSessionId || !multiplayerHost)) {
             // Small splash damage makes a heavy shell feel distinct.
             targets.forEach(target => {
               if (target.destroyed || target.health <= 0) return;
@@ -1522,6 +1786,8 @@ function updateShots(dt) {
               }
             });
           }
+
+          if (shot.networked && multiplayerHost) broadcastToPeers({ type: 'projectile-end', shotId: shot.shotId, weapon: shot.weapon, point: hit.point.toArray() });
 
           removeProjectile(shot);
           projectiles.splice(i, 1);
@@ -1535,6 +1801,9 @@ function updateShots(dt) {
     }
 
     if (shot.life <= 0) {
+      if (shot.kind === 'projectile' && shot.networked && shot.authoritative && multiplayerHost) {
+        broadcastToPeers({ type: 'projectile-end', shotId: shot.shotId, weapon: shot.weapon });
+      }
       removeProjectile(shot);
       projectiles.splice(i, 1);
     }
@@ -2196,6 +2465,7 @@ function update(dt) {
 }
 
   updateTankTransform();
+  resolveTankContacts();
 
   // CAMERA: the camera tracks the current aiming vector in every movement mode.
   const viewDirection = getAimDirection();
@@ -2341,6 +2611,7 @@ renderer.domElement.addEventListener('mousedown', event => {
     } else {
       minigunAccumulator = MINIGUN_INTERVAL;
       startMinigunAudio();
+      announceWeaponAudio(true);
     }
   }
 });
@@ -2352,6 +2623,7 @@ window.addEventListener('mouseup', event => {
     fireHeld = false;
     minigunAccumulator = 0;
     stopMinigunAudio();
+    announceWeaponAudio(false);
   }
 });
 
@@ -2366,6 +2638,7 @@ document.addEventListener('pointerlockchange', () => {
     fireHeld = false;
     minigunAccumulator = 0;
     stopMinigunAudio();
+    announceWeaponAudio(false);
     setZoom(false);
   }
   showMessage(
@@ -2476,6 +2749,7 @@ window.addEventListener('blur', () => {
   groundBoostWobblePitch = 0;
   fireHeld = false;
   stopMinigunAudio();
+  announceWeaponAudio(false);
   setZoom(false);
   if (flightState === 'flying') {
     // Losing focus cancels active thrust but leaves the tank drifting.
