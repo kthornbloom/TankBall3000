@@ -8,6 +8,43 @@ html, body {
   font-family: system-ui, sans-serif;
 }
 canvas { display: block; }
+#player-health-bars {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+.player-health-bar {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 80px;
+  transform: translate(-50%, -50%);
+}
+.player-health-bar[hidden] { display: none; }
+.player-health-label {
+  color: white;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  text-shadow: 0 1px 3px #000, 0 0 5px #000;
+}
+.player-health-track {
+  width: 72px;
+  height: 8px;
+  overflow: hidden;
+  background: #121820d9;
+  border: 1px solid #ffffffd0;
+  border-radius: 5px;
+  box-shadow: 0 1px 4px #000b;
+}
+.player-health-fill {
+  width: 100%;
+  height: 100%;
+  transition: width 140ms linear;
+}
 
 #hud, #help, #crosshair, #message { visibility: hidden; }
 body.game-started #hud,
