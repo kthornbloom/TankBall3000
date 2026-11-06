@@ -195,20 +195,20 @@ const camera = new THREE.PerspectiveCamera(
 );
 
 // 2. Load HDRI Environment Map using modern imports
-// const pmremGenerator = new THREE.PMREMGenerator(renderer);
-// pmremGenerator.compileEquirectangularShader();
+const pmremGenerator = new THREE.PMREMGenerator(renderer);
+pmremGenerator.compileEquirectangularShader();
 
-// new RGBELoader().load('assets/levels/backdrop.hdr', texture => {
-//   const envMap = pmremGenerator.fromEquirectangular(texture).texture;
+new RGBELoader().load('assets/levels/backdrop.hdr', texture => {
+  const envMap = pmremGenerator.fromEquirectangular(texture).texture;
 
-//   scene.environment = envMap;
-//   scene.background = envMap;
+  scene.environment = envMap;
+  scene.background = envMap;
 
-//   texture.dispose();
-//   pmremGenerator.dispose();
+  texture.dispose();
+  pmremGenerator.dispose();
 
-//   loadGltfModel();
-// });
+  loadGltfModel();
+});
 
 // Brighter cool fill lifts the darkest surfaces while leaving direct shadows visible.
 const ambientLight = new THREE.HemisphereLight(
@@ -365,7 +365,7 @@ explosionAudio.preload = 'auto';
 explosionAudio.volume = 0.8;
 const musicAudio = new Audio();
 musicAudio.preload = 'none';
-musicAudio.volume = 0.16;
+musicAudio.volume = 0.05;
 let musicTrackIndex = Math.floor(Math.random() * MUSIC_TRACKS.length);
 let musicStarted = false;
 const flightClunkAudio = new Audio(FLIGHT_CLUNK_AUDIO_URL);
@@ -532,7 +532,7 @@ function registerTargets(root) {
   targets.length = 0;
 
   root.traverse(obj => {
-    if (!obj.name || !obj.name.toLowerCase().startsWith('target-')) return;
+    if (!obj.name || !obj.name.toLowerCase().startsWith('target')) return;
 
     const meshes = [];
     obj.traverse(child => {
@@ -578,7 +578,7 @@ function registerTargets(root) {
   });
 
   updateTargetHud();
-  console.info(`Registered ${targets.length} target(s). Name level objects with target- prefix.`);
+  console.info(`Registered ${targets.length} target(s). Name level objects with target prefix.`);
 }
 
 function updateTargetHud(lastTarget = null) {
@@ -1583,7 +1583,6 @@ function updateCameraOcclusion() {
   raycaster.far = distance - 0.35;
 
   const hits = raycaster.intersectObjects(levelMeshes, true);
-  const shouldFade = new Set();
   const obstructionPoint = hits.length ? hits[0].point : null;
 
   // Restore materials that are no longer between the tank and camera.
@@ -1612,7 +1611,6 @@ function updateCameraOcclusion() {
   for (const mat of hitMaterials) {
     if (!mat || !cameraFadeMaterials.has(mat)) continue;
 
-    shouldFade.add(mat);
     setCameraFade(mat, obstructionPoint, CAMERA_FADE_STRENGTH);
 
     if (!mat.transparent || mat.depthWrite) {
@@ -2793,32 +2791,35 @@ function update(dt) {
   // CAMERA: the camera tracks the current aiming vector in every movement mode.
   const viewDirection = getAimDirection();
   const airborneLook = flightState === 'flying' || flightState === 'drifting';
-  const cameraUpRate = flightState === 'reattaching' ? 10 : 0.75;
+  const cameraUpRate = flightState === 'reattaching' ? 18 : 12;
   if (airborneLook) camera.up.copy(flightAimUp);
   else camera.up.lerp(normal, 1 - Math.exp(-cameraUpRate * dt));
 
   if (firstPerson) {
     clearCameraOcclusion();
     const fpPosition = position.clone().addScaledVector(normal, ballRadius * 1.65);
-    camera.position.lerp(fpPosition, 1 - Math.exp(-1.8 * dt));
+    camera.position.lerp(fpPosition, 1 - Math.exp(-16 * dt));
     const fpLookTarget = camera.position.clone().addScaledVector(viewDirection, 20);
-    cameraLookTarget.lerp(fpLookTarget, 1 - Math.exp(-2.0 * dt));
+    cameraLookTarget.lerp(fpLookTarget, 1 - Math.exp(-16 * dt));
     camera.lookAt(cameraLookTarget);
   } else {
     const cameraUp = airborneLook ? flightAimUp : normal;
-    // Follow the mouse-controlled look direction in both axes while keeping
-    // the camera centered laterally behind the vehicle.
-    const cameraForward = viewDirection;
+    // Keep pitch from moving the camera boom into or away from the tank.
+    // Yaw still orbits the camera, while the full aim direction controls look.
+    const cameraForward = viewDirection.clone()
+      .projectOnPlane(cameraUp)
+      .normalize();
+    if (cameraForward.lengthSq() < 0.001) cameraForward.copy(heading);
     const desiredCamera = position.clone()
       .addScaledVector(cameraForward, -thirdPersonDistance)
       .addScaledVector(cameraUp, CAMERA_HEIGHT * thirdPersonDistance / CAMERA_DISTANCE);
-    camera.position.lerp(desiredCamera, 1 - Math.exp(-1.25 * dt));
+    camera.position.lerp(desiredCamera, 1 - Math.exp(-16 * dt));
     const aimTarget = position.clone()
       .addScaledVector(normal, ballRadius * 1.15)
-      .addScaledVector(cameraForward, 12);
-    cameraLookTarget.lerp(aimTarget, 1 - Math.exp(-2.0 * dt));
-    camera.lookAt(cameraLookTarget);
+      .addScaledVector(viewDirection, 12);
+    cameraLookTarget.lerp(aimTarget, 1 - Math.exp(-16 * dt));
     updateCameraOcclusion();
+    camera.lookAt(cameraLookTarget);
   }
 
   if (thrusterMesh) {
