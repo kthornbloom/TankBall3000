@@ -94,7 +94,7 @@ import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 // SETTINGS
 // ============================================================
 
-const LEVEL_URL = './assets/levels/test-lvl.glb';
+const LEVEL_URL = './assets/levels/test-lvl3.glb';
 const TANK_URL = './assets/tanks/test-tank.glb';
 
 const MODEL_SCALE = 1;
@@ -1976,7 +1976,11 @@ function finishRemoteProjectile(message) {
   }
   if (typeof message.targetId === 'string' && Number.isFinite(message.health)) {
     updateTankHealth(message.targetId, message.health);
-    if (message.targetId === multiplayerSessionId && localTankHealth > 0) showMessage('TANK HIT');
+    if (message.health <= 0) {
+      showRemoteTankDestruction({ sessionId: message.targetId, pose: message.targetPose });
+    } else if (message.targetId === multiplayerSessionId && localTankHealth > 0) {
+      showMessage('TANK HIT');
+    }
   }
   if (Array.isArray(message.point) && message.point.every(Number.isFinite)) {
     const isCannon = message.weapon === 'cannon';
@@ -2060,7 +2064,15 @@ function updateShots(dt) {
           if (multiplayerHost) broadcastToPeers({ type: 'tank-health', sessionId: tankHit.targetId, health });
           if (health <= 0) broadcastTankDestroyed(tankHit.targetId);
           spawnImpact(tankHit.point, 0xff4a35, shot.weapon === 'cannon' ? 0.65 : 0.24);
-          if (shot.networked && multiplayerHost) broadcastToPeers({ type: 'projectile-end', shotId: shot.shotId, weapon: shot.weapon, targetId: tankHit.targetId, health, point: tankHit.point.toArray() });
+          if (shot.networked && multiplayerHost) {
+            const targetPose = tankHit.targetId === multiplayerSessionId
+              ? localTankPose()
+              : multiplayerPoses.get(tankHit.targetId)?.pose || null;
+            broadcastToPeers({
+              type: 'projectile-end', shotId: shot.shotId, weapon: shot.weapon,
+              targetId: tankHit.targetId, health, targetPose, point: tankHit.point.toArray()
+            });
+          }
           removeProjectile(shot);
           projectiles.splice(i, 1);
           continue;
