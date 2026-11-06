@@ -95,8 +95,8 @@ import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 // SETTINGS
 // ============================================================
 
-const LEVEL_URL = './assets/levels/test-lvl3.glb';
-const TANK_URL = './assets/tanks/test-tank.glb';
+const LEVEL_URL = './assets/levels/mobius.glb';
+const TANK_URL = './assets/tanks/gold-tank.glb';
 
 const MODEL_SCALE = 1;
 const MODEL_FORWARD_NEGATIVE_Z = true;
@@ -113,6 +113,8 @@ const DRAG = 2.0;
 
 const MOUSE_SENSITIVITY = 0.0025;
 const MAX_AIM_PITCH = Math.PI / 2; // Aim vertically up or down
+const FLIGHT_AIM_RESPONSE = 7;
+const FLIGHT_CAMERA_RESPONSE = 5;
 
 const TURN_RATE = 2.7;
 const TURN_RESPONSE = 5;
@@ -166,7 +168,9 @@ const MINIGUN_DAMAGE = 12;
 const MINIGUN_INTERVAL = 0.085;
 const TARGET_STARTING_HEALTH = 100;
 
-const THRUST_DURATION = 3; // Total available thrust time per detach
+const THRUST_DURATION = 3; // Total available thrust time before recharge
+const THRUST_RECHARGE_DELAY = 5;
+const THRUST_RECHARGE_DURATION = 1;
 const REATTACH_ORIENT_DURATION = 1.5;
 const FLIGHT_PUSH_OFF = 8;
 const FLIGHT_INITIAL_SPEED = 3.5;
@@ -267,6 +271,7 @@ const position = new THREE.Vector3();
 const normal = new THREE.Vector3(0, 1, 0);
 const heading = new THREE.Vector3(0, 0, -1);
 const aimDirection = new THREE.Vector3(0, 0, -1);
+const flightAimTargetDirection = new THREE.Vector3(0, 0, -1);
 const flightAimDirection = new THREE.Vector3(0, 0, -1);
 const flightAimUp = new THREE.Vector3(0, 1, 0);
 
@@ -304,6 +309,7 @@ let forwardSpeed = 0;
 let strafeSpeed = 0;
 
 let aimPitch = 0;
+let flightAimTargetPitch = 0;
 let bodyPitchLean = 0;
 let bodySideLean = 0;
 
@@ -331,7 +337,9 @@ let fireHeld = false;
 let minigunAccumulator = 0;
 let weaponCooldown = 0;
 let flightState = 'attached'; // attached, flying, orienting, reattaching
-let thrustRemaining = 0;
+let thrustRemaining = THRUST_DURATION;
+let thrustRechargeDelayRemaining = 0;
+let thrustRechargeStarted = false;
 let flightSpaceHeld = false;
 let reattachElapsed = 0;
 let reattachPlayClank = true;
@@ -866,6 +874,38 @@ function getAimDirection() {
     .normalize();
 }
 
+function updateFlightAimFromSurfaceAngles() {
+  const pitch = aimPitch;
+  flightAimDirection.copy(aimDirection)
+    .multiplyScalar(Math.cos(pitch))
+    .addScaledVector(normal, Math.sin(pitch))
+    .normalize();
+
+  // This tangent stays continuous as aim passes either pole, unlike a
+  // projection that becomes zero at vertical aim and has to choose a new up.
+  flightAimUp.copy(aimDirection)
+    .multiplyScalar(-Math.sin(pitch))
+    .addScaledVector(normal, Math.cos(pitch))
+    .normalize();
+}
+
+function updateFlightAim(dt) {
+  const response = 1 - Math.exp(-FLIGHT_AIM_RESPONSE * dt);
+  const yawDifference = Math.atan2(
+    normal.dot(new THREE.Vector3().crossVectors(aimDirection, flightAimTargetDirection)),
+    THREE.MathUtils.clamp(aimDirection.dot(flightAimTargetDirection), -1, 1)
+  );
+  aimDirection.applyAxisAngle(normal, yawDifference * response)
+    .projectOnPlane(normal).normalize();
+
+  const pitchDifference = Math.atan2(
+    Math.sin(flightAimTargetPitch - aimPitch),
+    Math.cos(flightAimTargetPitch - aimPitch)
+  );
+  aimPitch += pitchDifference * response;
+  updateFlightAimFromSurfaceAngles();
+}
+
 function updateTankTransform() {
 
   tankRoot.position.copy(position);
@@ -881,25 +921,30 @@ function updateTankTransform() {
   if (bodyGroup) {
     bodyGroup.rotation.order = 'YXZ';
     const visualAim = getAimDirection();
-    const tangentAim = visualAim.clone()
-      .projectOnPlane(normal).normalize();
+    const airborneAim = flightState === 'flying' || flightState === 'drifting';
+    const tangentAim = airborneAim
+      ? aimDirection.clone().projectOnPlane(normal)
+      : visualAim.clone().projectOnPlane(normal);
+    if (tangentAim.lengthSq() < 0.001) tangentAim.copy(aimDirection).projectOnPlane(normal);
+    if (tangentAim.lengthSq() < 0.001) tangentAim.copy(heading).projectOnPlane(normal);
+    tangentAim.normalize();
 
     const yaw = Math.atan2(
       heading.clone().cross(tangentAim).dot(normal),
       heading.dot(tangentAim)
     );
 
-    const pitch = Math.asin(
-      THREE.MathUtils.clamp(visualAim.dot(normal), -1, 1)
-    );
+    const pitch = airborneAim
+      ? aimPitch
+      : Math.asin(THREE.MathUtils.clamp(visualAim.dot(normal), -1, 1));
 
     bodyGroup.rotation.y =
       MODEL_FORWARD_NEGATIVE_Z ? yaw : -yaw;
 
     bodyGroup.rotation.x =
-      (MODEL_FORWARD_NEGATIVE_Z ? pitch : -pitch) + bodyPitchLean;
+      (MODEL_FORWARD_NEGATIVE_Z ? pitch : -pitch) + (airborneAim ? 0 : bodyPitchLean);
 
-    bodyGroup.rotation.z = bodySideLean;
+    bodyGroup.rotation.z = airborneAim ? 0 : bodySideLean;
   }
 }
 
@@ -1287,6 +1332,8 @@ function respawnLocalPlayer() {
   flightState = 'attached';
   setMagnetsActive(true);
   thrustRemaining = THRUST_DURATION;
+  thrustRechargeDelayRemaining = 0;
+  thrustRechargeStarted = false;
   normal.set(0, 1, 0);
   heading.set(0, 0, -1);
   aimDirection.copy(heading);
@@ -2258,8 +2305,8 @@ function updateFreeFall(dt) {
 function startFlight() {
   if (!levelMeshes.length) return false;
 
-  // No thrust fuel left: cannot thrust again until landing.
-  if (thrustRemaining <= 0 && flightState !== 'attached') return false;
+  // The reserve must recharge before thrust can be engaged again.
+  if (thrustRemaining <= 0) return false;
 
   // Already thrusting.
   if (flightState === 'flying') {
@@ -2268,22 +2315,13 @@ function startFlight() {
   }
 
   if (flightState === 'attached') {
-    // Initialize the fuel reserve only when first detaching.
-    thrustRemaining = THRUST_DURATION;
     freeFallStarted = false;
 
     const initialDirection = getAimDirection();
     flightAimDirection.copy(initialDirection).normalize();
-    flightAimUp.copy(normal).addScaledVector(
-      flightAimDirection,
-      -flightAimUp.dot(flightAimDirection)
-    );
-    if (flightAimUp.lengthSq() < 0.001) {
-      flightAimUp.set(0, 1, 0);
-      if (Math.abs(flightAimUp.dot(flightAimDirection)) > 0.95) flightAimUp.set(1, 0, 0);
-      flightAimUp.addScaledVector(flightAimDirection, -flightAimUp.dot(flightAimDirection));
-    }
-    flightAimUp.normalize();
+    flightAimTargetDirection.copy(aimDirection);
+    flightAimTargetPitch = aimPitch;
+    updateFlightAimFromSurfaceAngles();
 
     flightVelocity.copy(normal)
       .multiplyScalar(FLIGHT_PUSH_OFF)
@@ -2303,6 +2341,30 @@ function startFlight() {
   flightSpaceHeld = true;
   showMessage(`THRUST ENGAGED — ${thrustRemaining.toFixed(1)}s REMAINING`);
   return true;
+}
+
+function updateThrustRecharge(dt) {
+  if (flightState === 'flying' || thrustRemaining >= THRUST_DURATION) return;
+
+  let rechargeDt = 0;
+  if (thrustRechargeDelayRemaining > 0) {
+    rechargeDt = Math.max(0, dt - thrustRechargeDelayRemaining);
+    thrustRechargeDelayRemaining = Math.max(0, thrustRechargeDelayRemaining - dt);
+    if (thrustRechargeDelayRemaining === 0 && thrustRemaining <= 0) thrustRechargeStarted = true;
+  } else if (thrustRechargeStarted) {
+    rechargeDt = dt;
+  }
+
+  if (thrustRechargeStarted && rechargeDt > 0) {
+    thrustRemaining = Math.min(
+      THRUST_DURATION,
+      thrustRemaining + rechargeDt * THRUST_DURATION / THRUST_RECHARGE_DURATION
+    );
+    if (thrustRemaining >= THRUST_DURATION) {
+      thrustRechargeStarted = false;
+      thrustRechargeDelayRemaining = 0;
+    }
+  }
 }
 
 
@@ -2660,7 +2722,6 @@ aimPitch *= Math.exp(-8 * dt);
   flightSpaceHeld = false;
   flightState = 'attached';
 
-  thrustRemaining = THRUST_DURATION;
   freeFallStarted = false;
     if (reattachPlayClank) playOneShot(flightClunkAudio);
 
@@ -2696,6 +2757,8 @@ function update(dt) {
     return;
   }
 
+  updateThrustRecharge(dt);
+  if (flightState === 'flying' || flightState === 'drifting') updateFlightAim(dt);
   weaponCooldown = Math.max(0, weaponCooldown - dt);
 
   // Existing one-second boost is only available while magnetically attached.
@@ -2803,12 +2866,13 @@ function update(dt) {
         unsupportedSurfaceTime += dt;
         if (unsupportedSurfaceTime >= 0.12) {
           flightVelocity.copy(movement);
-          flightAimDirection.copy(movement).normalize();
-          flightAimUp.copy(normal);
+          aimDirection.copy(movement).projectOnPlane(normal).normalize();
+          if (aimDirection.lengthSq() < 0.001) aimDirection.copy(heading);
+          aimPitch = 0;
+          flightAimTargetDirection.copy(aimDirection);
+          flightAimTargetPitch = 0;
+          updateFlightAimFromSurfaceAngles();
           flightState = 'drifting';
-          // Leaving a surface without detaching is still a fresh flight: the
-          // player has the full thrust reserve available when they go airborne.
-          thrustRemaining = THRUST_DURATION;
           freeFallStarted = false;
           showMessage('FREE FLOAT — SPACE TO THRUST — PRESS LEFT CTRL TO RE-ENGAGE');
         }
@@ -2816,7 +2880,12 @@ function update(dt) {
     }
 } else if (flightState === 'flying') {
   // Fuel is consumed ONLY while Space is held.
+  const thrustBeforeDrain = thrustRemaining;
   thrustRemaining = Math.max(0, thrustRemaining - dt);
+  if (thrustBeforeDrain > 0 && thrustRemaining <= 0) {
+    thrustRechargeDelayRemaining = THRUST_RECHARGE_DELAY;
+    thrustRechargeStarted = false;
+  }
 
   const thrustDirection = getAimDirection();
 
@@ -2865,33 +2934,52 @@ function update(dt) {
   // CAMERA: the camera tracks the current aiming vector in every movement mode.
   const viewDirection = getAimDirection();
   const airborneLook = flightState === 'flying' || flightState === 'drifting';
-  const cameraUpRate = flightState === 'reattaching' ? 18 : 12;
   if (airborneLook) camera.up.copy(flightAimUp);
-  else camera.up.lerp(normal, 1 - Math.exp(-cameraUpRate * dt));
+  else if (flightState === 'reattaching') camera.up.lerp(normal, 1 - Math.exp(-18 * dt));
 
   if (firstPerson) {
+    if (!airborneLook) camera.up.lerp(normal, 1 - Math.exp(-16 * dt));
     clearCameraOcclusion();
     const fpPosition = position.clone().addScaledVector(normal, ballRadius * 1.65);
     camera.position.lerp(fpPosition, 1 - Math.exp(-16 * dt));
     const fpLookTarget = camera.position.clone().addScaledVector(viewDirection, 20);
     cameraLookTarget.lerp(fpLookTarget, 1 - Math.exp(-16 * dt));
     camera.lookAt(cameraLookTarget);
-  } else {
-    const cameraUp = airborneLook ? flightAimUp : normal;
-    // Keep pitch from moving the camera boom into or away from the tank.
-    // Yaw still orbits the camera, while the full aim direction controls look.
-    const cameraForward = viewDirection.clone()
-      .projectOnPlane(cameraUp)
-      .normalize();
-    if (cameraForward.lengthSq() < 0.001) cameraForward.copy(heading);
+  } else if (airborneLook) {
+    // Lock the third-person camera to the turret's aim frame. Position and
+    // viewing direction rotate together, with a little follow-through.
     const desiredCamera = position.clone()
-      .addScaledVector(cameraForward, -thirdPersonDistance)
-      .addScaledVector(cameraUp, CAMERA_HEIGHT * thirdPersonDistance / CAMERA_DISTANCE);
-    camera.position.lerp(desiredCamera, 1 - Math.exp(-16 * dt));
-    const aimTarget = position.clone()
-      .addScaledVector(normal, ballRadius * 1.15)
-      .addScaledVector(viewDirection, 12);
-    cameraLookTarget.lerp(aimTarget, 1 - Math.exp(-16 * dt));
+      .addScaledVector(viewDirection, -thirdPersonDistance)
+      .addScaledVector(flightAimUp, CAMERA_HEIGHT * thirdPersonDistance / CAMERA_DISTANCE);
+    const desiredLookTarget = position.clone().addScaledVector(viewDirection, 20);
+    const cameraFollow = 1 - Math.exp(-FLIGHT_CAMERA_RESPONSE * dt);
+    camera.position.lerp(desiredCamera, cameraFollow);
+    cameraLookTarget.lerp(desiredLookTarget, cameraFollow);
+    updateCameraOcclusion();
+    camera.lookAt(cameraLookTarget);
+  } else {
+    // Track the turret in the same aim-relative frame in both drive and flight.
+    // Drive pitch stays constrained by the current surface normal.
+    const cameraPitch = THREE.MathUtils.clamp(
+      aimPitch + groundBoostWobblePitch,
+      -MAX_AIM_PITCH,
+      MAX_AIM_PITCH
+    );
+    const cameraYawDirection = aimDirection.clone()
+      .applyAxisAngle(normal, groundBoostWobbleYaw)
+      .projectOnPlane(normal).normalize();
+    const driveCameraUp = cameraYawDirection.clone()
+      .multiplyScalar(-Math.sin(cameraPitch))
+      .addScaledVector(normal, Math.cos(cameraPitch))
+      .normalize();
+    const cameraFollow = 1 - Math.exp(-FLIGHT_CAMERA_RESPONSE * dt);
+    camera.up.lerp(driveCameraUp, cameraFollow).normalize();
+    const desiredCamera = position.clone()
+      .addScaledVector(viewDirection, -thirdPersonDistance)
+      .addScaledVector(driveCameraUp, CAMERA_HEIGHT * thirdPersonDistance / CAMERA_DISTANCE);
+    const desiredLookTarget = position.clone().addScaledVector(viewDirection, 20);
+    camera.position.lerp(desiredCamera, cameraFollow);
+    cameraLookTarget.lerp(desiredLookTarget, cameraFollow);
     updateCameraOcclusion();
     camera.lookAt(cameraLookTarget);
   }
@@ -2920,11 +3008,13 @@ function update(dt) {
   }
 
   updateShots(dt);
+  updateDestructionEffects(dt);
   updateCollisionSparks(dt);
   updateEngineAudio(dt);
 
   const airborne = flightState === 'flying' || flightState === 'drifting';
-  el('flight-boost-meter').hidden = !airborne;
+  const thrustRecharging = thrustRechargeStarted || thrustRechargeDelayRemaining > 0;
+  el('flight-boost-meter').hidden = !airborne && !thrustRecharging;
   el('mag-drive-hint').hidden = !airborne;
   el('boost-bar').style.width = `${THREE.MathUtils.clamp(thrustRemaining / THRUST_DURATION, 0, 1) * 100}%`;
   el('boost-time').textContent = `${thrustRemaining.toFixed(1)}s`;
@@ -3052,23 +3142,14 @@ document.addEventListener('mousemove', event => {
   const pitch = -event.movementY * MOUSE_SENSITIVITY;
 
   if (flightState === 'flying' || flightState === 'drifting') {
-    // Free-flight look: rotate the complete look frame, with no pitch clamp.
-    // Yaw around the current camera-up axis, then pitch around camera-right.
-    const yawRotation = new THREE.Quaternion()
-      .setFromAxisAngle(flightAimUp, yaw);
-    flightAimDirection.applyQuaternion(yawRotation).normalize();
-    flightAimUp.applyQuaternion(yawRotation).normalize();
-
-    const flightRight = new THREE.Vector3()
-      .crossVectors(flightAimDirection, flightAimUp)
-      .normalize();
-
-    if (flightRight.lengthSq() > 0.001) {
-      const pitchRotation = new THREE.Quaternion()
-        .setFromAxisAngle(flightRight, pitch);
-      flightAimDirection.applyQuaternion(pitchRotation).normalize();
-      flightAimUp.applyQuaternion(pitchRotation).normalize();
-    }
+    // Flight uses the same upright yaw/pitch controls as driving: yaw can
+    // turn all the way around the ball, while pitch never rolls the turret.
+    const yawHemisphere = Math.cos(aimPitch) < 0 ? -1 : 1;
+    flightAimTargetDirection.applyAxisAngle(normal, yaw * yawHemisphere)
+      .projectOnPlane(normal).normalize();
+    flightAimTargetPitch += pitch;
+    while (flightAimTargetPitch > Math.PI) flightAimTargetPitch -= Math.PI * 2;
+    while (flightAimTargetPitch < -Math.PI) flightAimTargetPitch += Math.PI * 2;
   } else if (flightState === 'attached') {
     // Surface mode stays constrained to the current magnetized surface.
     aimDirection.applyAxisAngle(normal, yaw)
