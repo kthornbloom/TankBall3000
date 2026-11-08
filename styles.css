@@ -46,10 +46,12 @@ canvas { display: block; }
   transition: width 140ms linear;
 }
 
-#hud, #help, #crosshair, #message { visibility: hidden; }
+#hud, #help, #crosshair, #reticle-link, #body-crosshair, #message { visibility: hidden; }
 body.game-started #hud,
 body.game-started #help,
 body.game-started #crosshair,
+body.game-started #reticle-link,
+body.game-started #body-crosshair,
 body.game-started #message { visibility: visible; }
 
 #start-screen {
@@ -180,41 +182,48 @@ body.game-started #message { visibility: visible; }
   position: fixed;
   top: 50%;
   left: 50%;
-  width: 24px;
-  height: 24px;
+  width: 14px;
+  height: 14px;
   transform: translate(-50%, -50%);
   pointer-events: none;
   z-index: 4;
-}
-#crosshair:before, #crosshair:after {
-  content: "";
-  position: absolute;
-  background: white;
-  box-shadow: 0 0 3px black;
-}
-#crosshair:before {
-  width: 1px; height: 20px;
-  left: 50%; top: 50%;
-  transform: translate(-50%, -50%);
-}
-#crosshair:after {
-  width: 20px; height: 1px;
-  left: 50%; top: 50%;
-  transform: translate(-50%, -50%);
-}
-#crosshair span {
-  position: absolute;
-  width: 4px; height: 4px;
-  border: 1px solid white;
+  border: 1.5px solid white;
   border-radius: 50%;
-  top: 50%; left: 50%;
-  transform: translate(-50%, -50%);
+  box-shadow: 0 0 4px #000, 0 0 3px #ffffff88;
 }
 body.first-person #crosshair {
-  width: 18px; height: 18px;
+  width: 12px; height: 12px;
 }
-body.first-person #crosshair:before { height: 12px; }
-body.first-person #crosshair:after { width: 12px; }
+
+#body-crosshair {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  width: 12px;
+  height: 12px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 4;
+  opacity: 0;
+  border: 1.5px solid #ff4545;
+  border-radius: 50%;
+  box-shadow: 0 0 5px #ff252588, inset 0 0 3px #ff252566;
+}
+#reticle-link {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 1px;
+  transform-origin: left center;
+  pointer-events: none;
+  z-index: 3;
+  opacity: 0;
+  background: #ff4545;
+  box-shadow: 0 0 4px #ff252588;
+}
+#body-crosshair[hidden] { display: none; }
+#reticle-link[hidden] { display: none; }
 
 #message {
   display: none;

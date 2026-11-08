@@ -24,6 +24,26 @@ export const LEVELS = Object.freeze({
     ambientLightColor: DEFAULT_AMBIENT_LIGHT,
     secondaryLightColor: DEFAULT_SECONDARY_LIGHT,
     thumbnailImage: null
+  }),
+  'hudson-spaceport': Object.freeze({
+    id: 'hudson-spaceport',
+    name: 'Hudson Spaceport',
+    description: 'The original blockout arena.',
+    model: './assets/levels/hudson-spaceport.glb',
+    hdriMap: DEFAULT_HDRI,
+    ambientLightColor: DEFAULT_AMBIENT_LIGHT,
+    secondaryLightColor: DEFAULT_SECONDARY_LIGHT,
+    thumbnailImage: null
+  }),
+  'cube': Object.freeze({
+    id: 'cube',
+    name: 'cube',
+    description: 'The original blockout arena.',
+    model: './assets/levels/cuber.glb',
+    hdriMap: './assets/levels/sky.exr',
+    ambientLightColor: DEFAULT_AMBIENT_LIGHT,
+    secondaryLightColor: DEFAULT_SECONDARY_LIGHT,
+    thumbnailImage: null
   })
 });
 

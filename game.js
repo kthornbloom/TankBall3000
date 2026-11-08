@@ -46,8 +46,6 @@ const CAMERA_MIN_DISTANCE = 4.5;
 const CAMERA_MAX_DISTANCE = 20;
 const CAMERA_DISTANCE_STEP = 0.9;
 const CAMERA_ZOOM_FOV = 42;
-const CAMERA_FADE_RADIUS = 4.5;
-const CAMERA_FADE_STRENGTH = 0.92;
 
 const SURFACE_RESPONSE = 16;
 
@@ -100,6 +98,27 @@ const REATTACH_DRAG = 2.2;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x101722);
+
+// Keep the weapon flash objects in the scene from startup so the first shot
+// does not introduce a new light or material shader variant.
+const muzzleFlashLight = new THREE.PointLight(0xffb347, 0, 9, 2);
+muzzleFlashLight.castShadow = false;
+scene.add(muzzleFlashLight);
+const muzzleFlash = new THREE.Mesh(
+  new THREE.SphereGeometry(0.22, 10, 7),
+  new THREE.MeshBasicMaterial({
+    color: 0xffc45c,
+    transparent: true,
+    opacity: 0,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    toneMapped: false
+  })
+);
+scene.add(muzzleFlash);
+let muzzleFlashLife = 0;
+let muzzleFlashDuration = 0.1;
+let muzzleFlashPeakIntensity = 20;
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -196,11 +215,10 @@ const aimDirection = new THREE.Vector3(0, 0, -1);
 const flightAimTargetDirection = new THREE.Vector3(0, 0, -1);
 const flightAimDirection = new THREE.Vector3(0, 0, -1);
 const flightAimUp = new THREE.Vector3(0, 1, 0);
+const flightAimTargetUp = new THREE.Vector3(0, 1, 0);
 
 let ballMesh = null;
 let bodyGroup = null;
-let gunGroup = null;
-let muzzleMarker = null;
 let tankModelTemplate = null;
 const remoteTanks = new Map();
 const playerHealthBars = new Map();
@@ -235,13 +253,13 @@ let localRespawnTimeout = null;
 
 let levelMeshes = [];
 let levelSpawnMarkers = [];
+let levelAnimationMixer = null;
 let ballRadius = 1;
 
 let forwardSpeed = 0;
 let strafeSpeed = 0;
 
 let aimPitch = 0;
-let flightAimTargetPitch = 0;
 let flightRoll = 0;
 let bodyPitchLean = 0;
 let bodySideLean = 0;
@@ -291,6 +309,9 @@ let thrusterMesh = null;
 let thrusterBaseQuaternion = null;
 let thrusterBasePosition = null;
 let thrusterBaseScale = null;
+let thrusterLights = [];
+let thrusterVisualMaterials = [];
+let thrusterEffectsActive = false;
 
 const cannonAudio = new Audio(CANNON_AUDIO_URL);
 cannonAudio.preload = 'auto';
@@ -342,9 +363,6 @@ thrustAudio.preload = 'auto';
 thrustAudio.loop = true;
 thrustAudio.volume = 0.55;
 
-const materialDefaults = new Map();
-const cameraFadeMaterials = new Map();
-const fadedMaterials = new Set();
 const collisionSparks = [];
 let lastCollisionTime = -Infinity;
 let engineAudioUnlocked = false;
@@ -355,71 +373,6 @@ el('weapon').textContent = `${WEAPONS[DEFAULT_TANK.primaryWeapon].name} [1]`;
 // ============================================================
 // ASSET LOADING
 // ============================================================
-
-function installLocalizedCameraFade(material) {
-  // The fade is evaluated per-fragment in world space. The material can stay
-  // one mesh/material; only pixels near the camera's obstruction point fade.
-  const state = {
-    center: new THREE.Vector3(),
-    radius: CAMERA_FADE_RADIUS,
-    strength: 0,
-    uniforms: null
-  };
-
-  cameraFadeMaterials.set(material, state);
-
-  const previousCompile = material.onBeforeCompile;
-  const previousCacheKey = material.customProgramCacheKey
-    ? material.customProgramCacheKey.bind(material)
-    : () => '';
-
-  material.onBeforeCompile = shader => {
-    if (previousCompile) previousCompile.call(material, shader);
-
-    shader.uniforms.uCameraFadeCenter = { value: state.center };
-    shader.uniforms.uCameraFadeRadius = { value: state.radius };
-    shader.uniforms.uCameraFadeStrength = { value: state.strength };
-    state.uniforms = shader.uniforms;
-
-    shader.vertexShader = shader.vertexShader.replace(
-      '#include <common>',
-      '#include <common>\nvarying vec3 vCameraFadeWorldPosition;'
-    );
-
-    shader.vertexShader = shader.vertexShader.replace(
-      '#include <begin_vertex>',
-      '#include <begin_vertex>\nvec4 cameraFadeWorldPosition = modelMatrix * vec4(transformed, 1.0);\nvCameraFadeWorldPosition = cameraFadeWorldPosition.xyz;'
-    );
-
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <common>',
-      '#include <common>\nvarying vec3 vCameraFadeWorldPosition;\nuniform vec3 uCameraFadeCenter;\nuniform float uCameraFadeRadius;\nuniform float uCameraFadeStrength;'
-    );
-
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <color_fragment>',
-      '#include <color_fragment>\nfloat cameraFadeDistance = distance(vCameraFadeWorldPosition, uCameraFadeCenter);\nfloat cameraFadeMask = 1.0 - smoothstep(uCameraFadeRadius * 0.45, uCameraFadeRadius, cameraFadeDistance);\ndiffuseColor.a *= 1.0 - cameraFadeMask * uCameraFadeStrength;'
-    );
-  };
-
-  material.customProgramCacheKey = () =>
-    previousCacheKey() + '|localized-camera-fade-v1';
-}
-
-function setCameraFade(material, center, strength) {
-  const state = cameraFadeMaterials.get(material);
-  if (!state) return;
-
-  state.center.copy(center);
-  state.strength = strength;
-  state.radius = CAMERA_FADE_RADIUS;
-
-  if (state.uniforms) {
-    state.uniforms.uCameraFadeCenter.value = state.center;
-    state.uniforms.uCameraFadeRadius.value = state.radius;
-    state.uniforms.uCameraFadeStrength.value = state.strength;
-  }
-}
 
 function configureImportedLights(root) {
   root.traverse(obj => {
@@ -436,6 +389,49 @@ function configureImportedLights(root) {
       obj.intensity.toFixed(3)
     );
   });
+}
+
+function configureThrusterEffects(root) {
+  thrusterLights = [];
+  thrusterVisualMaterials = [];
+  root.traverse(obj => {
+    if (obj.isLight) {
+      thrusterLights.push({ light: obj, intensity: obj.intensity });
+      obj.visible = true;
+      obj.intensity = 0;
+    }
+
+    if (!obj.isMesh || !obj.material) return;
+    const originalMaterials = Array.isArray(obj.material) ? obj.material : [obj.material];
+    const clonedMaterials = originalMaterials.map(material => {
+      if (!material) return material;
+      const clone = material.clone();
+      thrusterVisualMaterials.push({
+        material: clone,
+        colorWrite: clone.colorWrite,
+        depthWrite: clone.depthWrite
+      });
+      clone.colorWrite = false;
+      clone.depthWrite = false;
+      return clone;
+    });
+    obj.castShadow = false;
+    obj.receiveShadow = false;
+    obj.material = Array.isArray(obj.material) ? clonedMaterials : clonedMaterials[0];
+  });
+}
+
+function setThrusterEffectsActive(active) {
+  if (thrusterEffectsActive === active) return;
+  thrusterEffectsActive = active;
+  for (const entry of thrusterLights) {
+    entry.light.visible = true;
+    entry.light.intensity = active ? entry.intensity : 0;
+  }
+  for (const entry of thrusterVisualMaterials) {
+    entry.material.colorWrite = active ? entry.colorWrite : false;
+    entry.material.depthWrite = active ? entry.depthWrite : false;
+  }
 }
 
 function collectMeshes(root) {
@@ -455,14 +451,6 @@ function collectMeshes(root) {
 
       mat.side = THREE.DoubleSide;
 
-      if (!materialDefaults.has(mat)) {
-        materialDefaults.set(mat, {
-          opacity: mat.opacity,
-          transparent: mat.transparent,
-          depthWrite: mat.depthWrite
-        });
-        installLocalizedCameraFade(mat);
-      }
     });
 
     meshes.push(obj);
@@ -497,23 +485,8 @@ function registerTargets(root) {
       // Clone materials so damage tinting never changes unrelated level pieces.
       if (Array.isArray(mesh.material)) {
         mesh.material = mesh.material.map(mat => mat ? mat.clone() : mat);
-        mesh.material.forEach(mat => {
-          if (!mat) return;
-          materialDefaults.set(mat, {
-            opacity: mat.opacity,
-            transparent: mat.transparent,
-            depthWrite: mat.depthWrite
-          });
-          installLocalizedCameraFade(mat);
-        });
       } else if (mesh.material) {
         mesh.material = mesh.material.clone();
-        materialDefaults.set(mesh.material, {
-          opacity: mesh.material.opacity,
-          transparent: mesh.material.transparent,
-          depthWrite: mesh.material.depthWrite
-        });
-        installLocalizedCameraFade(mesh.material);
       }
     });
 
@@ -730,18 +703,25 @@ async function maybeFinishGameStartup() {
   updateTankTransform();
   scene.updateMatrixWorld(true);
 
-  // Compile the visible scene and the first-use thruster-light variant while
-  // the loading overlay is still up, avoiding a hitch when thrust begins.
-  const previousThrusterVisibility = thrusterMesh?.visible;
-  if (thrusterMesh) thrusterMesh.visible = true;
+  // Compile both thruster states and the muzzle flash light before gameplay.
+  // A newly active light can otherwise force a shader rebuild on the first shot.
+  setThrusterEffectsActive(true);
+  muzzleFlashLight.intensity = 17;
   try {
+    if (renderer.compileAsync) await renderer.compileAsync(scene, camera);
+    else renderer.compile(scene, camera);
+    renderer.render(scene, camera);
+
+    setThrusterEffectsActive(false);
+    muzzleFlashLight.intensity = 0;
     if (renderer.compileAsync) await renderer.compileAsync(scene, camera);
     else renderer.compile(scene, camera);
     renderer.render(scene, camera);
   } catch (error) {
     console.warn('Graphics warm-up did not complete:', error);
   } finally {
-    if (thrusterMesh) thrusterMesh.visible = previousThrusterVisibility ?? false;
+    setThrusterEffectsActive(false);
+    muzzleFlashLight.intensity = 0;
   }
 
   startGame(startupMode);
@@ -770,6 +750,13 @@ musicAudio.addEventListener('ended', () => {
 loader.load(LEVEL_URL, gltf => {
   levelRoot.add(gltf.scene);
   gltf.scene.updateMatrixWorld(true);
+  if (gltf.animations.length) {
+    levelAnimationMixer = new THREE.AnimationMixer(gltf.scene);
+    for (const clip of gltf.animations) {
+      levelAnimationMixer.clipAction(clip).play();
+      console.info(`Playing level animation: ${clip.name || 'unnamed'}`);
+    }
+  }
   configureImportedLights(gltf.scene);
   levelMeshes = collectMeshes(gltf.scene);
   levelSpawnMarkers = [];
@@ -822,8 +809,6 @@ loader.load(TANK_URL, gltf => {
     }
     if (obj.name === 'Ball') ballMesh = obj;
     if (obj.name === 'Body') bodyGroup = obj;
-    if (obj.name === 'Gun') gunGroup = obj;
-    if (obj.name === 'Muzzle') muzzleMarker = obj;
     if (obj.name && obj.name.toLowerCase() === 'magnets') {
       magnetsElement = obj;
       magnetsElement.visible = magnetsActive;
@@ -834,14 +819,14 @@ loader.load(TANK_URL, gltf => {
       thrusterBaseQuaternion = obj.quaternion.clone();
       thrusterBasePosition = obj.position.clone();
       thrusterBaseScale = obj.scale.clone();
-      obj.visible = false;
+      obj.visible = true;
       console.log('Thruster found:', obj.name);
     }
     
   });
+  if (thrusterMesh) configureThrusterEffects(thrusterMesh);
   if (!ballMesh) console.warn('Missing Ball mesh');
   if (!bodyGroup) console.warn('Missing Body group');
-  if (!gunGroup) console.warn('Missing Gun group');
   if (!magnetsElement) console.warn('Missing magnets element');
 
   if (ballMesh) {
@@ -954,42 +939,20 @@ function updateFlightAimFromSurfaceAngles() {
     .normalize();
 }
 
+function aimFrameQuaternion(direction, up) {
+  const forward = direction.clone().normalize();
+  const right = new THREE.Vector3().crossVectors(forward, up).normalize();
+  const correctedUp = new THREE.Vector3().crossVectors(right, forward).normalize();
+  const frame = new THREE.Matrix4().makeBasis(
+    right,
+    correctedUp,
+    forward.clone().negate()
+  );
+  return new THREE.Quaternion().setFromRotationMatrix(frame);
+}
+
 function getFlightUp() {
   return flightAimUp.clone().applyAxisAngle(flightAimDirection, flightRoll).normalize();
-}
-
-function wrapAngleNear(angle, reference) {
-  while (angle - reference > Math.PI) angle -= Math.PI * 2;
-  while (angle - reference < -Math.PI) angle += Math.PI * 2;
-  return angle;
-}
-
-function setFlightAimTargetFromDirection(direction) {
-  const vertical = THREE.MathUtils.clamp(direction.dot(normal), -1, 1);
-  const tangent = direction.clone().projectOnPlane(normal);
-  const tangentLength = tangent.length();
-
-  if (tangentLength < 0.0001) {
-    const polePitch = vertical >= 0 ? Math.PI / 2 : -Math.PI / 2;
-    flightAimTargetPitch = wrapAngleNear(polePitch, flightAimTargetPitch);
-    return;
-  }
-
-  tangent.divideScalar(tangentLength);
-  const principalPitch = Math.atan2(vertical, tangentLength);
-  const alternatePitch = principalPitch >= 0
-    ? Math.PI - principalPitch
-    : -Math.PI - principalPitch;
-  const principalNear = wrapAngleNear(principalPitch, flightAimTargetPitch);
-  const alternateNear = wrapAngleNear(alternatePitch, flightAimTargetPitch);
-
-  if (Math.abs(principalNear - flightAimTargetPitch) <= Math.abs(alternateNear - flightAimTargetPitch)) {
-    flightAimTargetDirection.copy(tangent);
-    flightAimTargetPitch = principalNear;
-  } else {
-    flightAimTargetDirection.copy(tangent).negate();
-    flightAimTargetPitch = alternateNear;
-  }
 }
 
 function updateFlightAim(dt) {
@@ -999,19 +962,24 @@ function updateFlightAim(dt) {
   while (flightRoll < -Math.PI) flightRoll += Math.PI * 2;
 
   const response = 1 - Math.exp(-FLIGHT_AIM_RESPONSE * dt);
-  const yawDifference = Math.atan2(
-    normal.dot(new THREE.Vector3().crossVectors(aimDirection, flightAimTargetDirection)),
-    THREE.MathUtils.clamp(aimDirection.dot(flightAimTargetDirection), -1, 1)
-  );
-  aimDirection.applyAxisAngle(normal, yawDifference * response)
-    .projectOnPlane(normal).normalize();
+  const currentFrame = aimFrameQuaternion(flightAimDirection, flightAimUp);
+  const targetFrame = aimFrameQuaternion(flightAimTargetDirection, flightAimTargetUp);
+  const frameDifference = targetFrame.multiply(currentFrame.clone().invert());
+  if (frameDifference.w < 0) {
+    frameDifference.set(
+      -frameDifference.x,
+      -frameDifference.y,
+      -frameDifference.z,
+      -frameDifference.w
+    );
+  }
+  const frameStep = new THREE.Quaternion().slerp(frameDifference, response);
+  flightAimDirection.applyQuaternion(frameStep).normalize();
+  flightAimUp.applyQuaternion(frameStep).normalize();
 
-  const pitchDifference = Math.atan2(
-    Math.sin(flightAimTargetPitch - aimPitch),
-    Math.cos(flightAimTargetPitch - aimPitch)
-  );
-  aimPitch += pitchDifference * response;
-  updateFlightAimFromSurfaceAngles();
+  const tangent = flightAimDirection.clone().projectOnPlane(normal);
+  if (tangent.lengthSq() > 0.0001) aimDirection.copy(tangent.normalize());
+  aimPitch = Math.asin(THREE.MathUtils.clamp(flightAimDirection.dot(normal), -1, 1));
 }
 
 function updateTankTransform() {
@@ -1031,9 +999,20 @@ function updateTankTransform() {
   }
 
   if (bodyGroup) {
-    bodyGroup.rotation.order = 'YXZ';
     const visualAim = getAimDirection();
     const airborneAim = flightState === 'flying' || flightState === 'drifting';
+    if (airborneAim) {
+      const forward = visualAim;
+      const up = getFlightUp();
+      const worldOrientation = aimFrameQuaternion(forward, up);
+      const parentOrientation = new THREE.Quaternion();
+      tankRoot.updateMatrixWorld(true);
+      bodyGroup.parent.getWorldQuaternion(parentOrientation);
+      bodyGroup.quaternion.copy(parentOrientation.invert().multiply(worldOrientation));
+      return;
+    }
+
+    bodyGroup.rotation.order = 'YXZ';
     const tangentAim = airborneAim
       ? aimDirection.clone().projectOnPlane(normal)
       : visualAim.clone().projectOnPlane(normal);
@@ -1046,17 +1025,15 @@ function updateTankTransform() {
       heading.dot(tangentAim)
     );
 
-    const pitch = airborneAim
-      ? aimPitch
-      : Math.asin(THREE.MathUtils.clamp(visualAim.dot(normal), -1, 1));
+    const pitch = Math.asin(THREE.MathUtils.clamp(visualAim.dot(normal), -1, 1));
 
     bodyGroup.rotation.y =
       MODEL_FORWARD_NEGATIVE_Z ? yaw : -yaw;
 
     bodyGroup.rotation.x =
-      (MODEL_FORWARD_NEGATIVE_Z ? pitch : -pitch) + (airborneAim ? 0 : bodyPitchLean);
+      (MODEL_FORWARD_NEGATIVE_Z ? pitch : -pitch) + bodyPitchLean;
 
-    bodyGroup.rotation.z = airborneAim ? 0 : bodySideLean;
+    bodyGroup.rotation.z = bodySideLean;
   }
 }
 
@@ -1220,6 +1197,68 @@ function updatePlayerHealthBars() {
   for (const [sessionId, bar] of playerHealthBars) {
     if (!activeBars.has(sessionId)) bar.element.hidden = true;
   }
+}
+
+function updateBodyCrosshair() {
+  const marker = el('body-crosshair');
+  const connector = el('reticle-link');
+  if (!gameStarted || !bodyGroup || localTankHealth <= 0) {
+    marker.hidden = true;
+    connector.hidden = true;
+    return;
+  }
+
+  tankRoot.updateMatrixWorld(true);
+  bodyGroup.updateWorldMatrix(true, false);
+  camera.updateMatrixWorld(true);
+
+  const bodyOrientation = new THREE.Quaternion();
+  bodyGroup.getWorldQuaternion(bodyOrientation);
+  const bodyForward = new THREE.Vector3(0, 0, -1)
+    .applyQuaternion(bodyOrientation)
+    .normalize();
+  const lookDirection = new THREE.Vector3();
+  camera.getWorldDirection(lookDirection);
+  const cameraForward = bodyForward.dot(lookDirection);
+  if (cameraForward <= 0.02) {
+    marker.hidden = true;
+    connector.hidden = true;
+    return;
+  }
+
+  // Offset outward from the main, screen-centered reticle by the body axis's
+  // angular difference in camera space. This aligns exactly when both axes do.
+  const cameraRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+  const cameraUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+  const tanHalfFov = Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5));
+  const viewX = bodyForward.dot(cameraRight) / (cameraForward * tanHalfFov * camera.aspect);
+  let viewY = bodyForward.dot(cameraUp) / (cameraForward * tanHalfFov);
+  if (!firstPerson) {
+    // The third-person camera is deliberately raised above the tank and aimed
+    // back toward it. Remove that steady mount angle so aligned aim sits at
+    // screen center; body/camera rotation differences remain visible.
+    const cameraHeight = CAMERA_HEIGHT * thirdPersonDistance / CAMERA_DISTANCE;
+    const targetDistance = thirdPersonDistance + 20;
+    viewY -= cameraHeight / (targetDistance * tanHalfFov);
+  }
+  const edgeX = THREE.MathUtils.clamp(-viewX, -0.94, 0.94);
+  const edgeY = THREE.MathUtils.clamp(-viewY, -0.94, 0.94);
+  const markerX = (edgeX * 0.5 + 0.5) * innerWidth;
+  const markerY = (-edgeY * 0.5 + 0.5) * innerHeight;
+  marker.style.left = `${markerX}px`;
+  marker.style.top = `${markerY}px`;
+  marker.hidden = false;
+
+  const deltaX = markerX - innerWidth * 0.5;
+  const deltaY = markerY - innerHeight * 0.5;
+  const distance = Math.hypot(deltaX, deltaY);
+  const maxDistance = Math.hypot(innerWidth * 0.47, innerHeight * 0.47);
+  const opacity = THREE.MathUtils.clamp(distance / maxDistance, 0, 1);
+  marker.style.opacity = opacity.toFixed(3);
+  connector.style.opacity = opacity.toFixed(3);
+  connector.style.width = `${Math.max(0, distance - 7)}px`;
+  connector.style.transform = `translateY(-50%) rotate(${Math.atan2(deltaY, deltaX)}rad)`;
+  connector.hidden = distance <= 7;
 }
 
 function resolveTankContacts() {
@@ -1772,68 +1811,19 @@ window.addEventListener('beforeunload', () => multiplayerPeer?.destroy());
 // CAMERA OCCLUSION
 // ============================================================
 
-function clearCameraOcclusion() {
-  for (const mat of fadedMaterials) {
-    const original = materialDefaults.get(mat);
-    if (original) {
-      mat.transparent = original.transparent;
-      mat.depthWrite = original.depthWrite;
-      mat.needsUpdate = true;
-    }
-    setCameraFade(mat, new THREE.Vector3(), 0);
-    fadedMaterials.delete(mat);
-  }
-}
-
-function updateCameraOcclusion() {
-  if (!levelMeshes.length) return;
-
-  const target = position.clone().addScaledVector(normal, 0.7);
-  const direction = camera.position.clone().sub(target);
+function resolveCameraCollision(cameraAnchor, desiredCamera) {
+  const direction = desiredCamera.clone().sub(cameraAnchor);
   const distance = direction.length();
-  if (distance < 0.001) return;
+  if (distance < 0.001 || !levelMeshes.length) return desiredCamera.clone();
 
-  raycaster.set(target, direction.normalize());
-  raycaster.far = distance - 0.35;
+  raycaster.set(cameraAnchor, direction.normalize());
+  raycaster.far = distance;
 
   const hits = raycaster.intersectObjects(levelMeshes, true);
-  const obstructionPoint = hits.length ? hits[0].point : null;
+  if (!hits.length) return desiredCamera.clone();
 
-  // Restore materials that are no longer between the tank and camera.
-  for (const mat of fadedMaterials) {
-    if (hits.length) {
-      const hitMats = Array.isArray(hits[0].object.material)
-        ? hits[0].object.material : [hits[0].object.material];
-      if (hitMats.includes(mat)) continue;
-    }
-
-    const original = materialDefaults.get(mat);
-    if (original) {
-      mat.transparent = original.transparent;
-      mat.depthWrite = original.depthWrite;
-      mat.needsUpdate = true;
-    }
-    setCameraFade(mat, new THREE.Vector3(), 0);
-    fadedMaterials.delete(mat);
-  }
-
-  if (!hits.length || !obstructionPoint) return;
-
-  const hitMaterials = Array.isArray(hits[0].object.material)
-    ? hits[0].object.material : [hits[0].object.material];
-
-  for (const mat of hitMaterials) {
-    if (!mat || !cameraFadeMaterials.has(mat)) continue;
-
-    setCameraFade(mat, obstructionPoint, CAMERA_FADE_STRENGTH);
-
-    if (!mat.transparent || mat.depthWrite) {
-      mat.transparent = true;
-      mat.depthWrite = false;
-      mat.needsUpdate = true;
-    }
-    fadedMaterials.add(mat);
-  }
+  const safeDistance = Math.max(0, hits[0].distance - 0.35);
+  return cameraAnchor.clone().addScaledVector(direction.normalize(), safeDistance);
 }
 
 // ============================================================
@@ -1992,50 +1982,21 @@ function handleCollisionImpact(point, surfaceNormal, impactSpeed, flight = false
 
 function getMuzzleWorldPosition() {
   tankRoot.updateMatrixWorld(true);
+  if (bodyGroup) bodyGroup.updateWorldMatrix(true, false);
 
-  const source = muzzleMarker || gunGroup;
-  if (!source) {
-    return position.clone()
-      .addScaledVector(normal, ballRadius * 1.8)
-      .addScaledVector(heading, ballRadius * 0.8);
-  }
+  // Muzzle offsets are authored per tank in right/up/forward axes. Rotate the
+  // offset with the tank body so the shot origin always follows its aim frame.
+  const offset = DEFAULT_TANK.muzzleOffset || {};
+  const localOffset = new THREE.Vector3(
+    Number.isFinite(offset.right) ? offset.right : 0,
+    Number.isFinite(offset.up) ? offset.up : 1.8,
+    -(Number.isFinite(offset.forward) ? offset.forward : 0.8)
+  );
+  const bodyOrientation = new THREE.Quaternion();
+  if (bodyGroup) bodyGroup.getWorldQuaternion(bodyOrientation);
+  else bodyOrientation.copy(tankRoot.quaternion);
 
-  source.updateWorldMatrix(true, true);
-
-  const origin = new THREE.Vector3();
-  source.getWorldPosition(origin);
-
-  const forward = new THREE.Vector3(0, 0, MODEL_FORWARD_NEGATIVE_Z ? -1 : 1)
-    .transformDirection(source.matrixWorld)
-    .normalize();
-
-  if (muzzleMarker) {
-    return origin.addScaledVector(forward, 0.08);
-  }
-
-  const box = new THREE.Box3().setFromObject(gunGroup);
-  if (box.isEmpty()) {
-    return origin.addScaledVector(forward, 0.12);
-  }
-
-  const { min, max } = box;
-  let muzzlePoint = origin.clone();
-  let alongBarrel = -Infinity;
-
-  for (const x of [min.x, max.x]) {
-    for (const y of [min.y, max.y]) {
-      for (const z of [min.z, max.z]) {
-        const corner = new THREE.Vector3(x, y, z);
-        const dist = corner.clone().sub(origin).dot(forward);
-        if (dist > alongBarrel) {
-          alongBarrel = dist;
-          muzzlePoint.copy(corner);
-        }
-      }
-    }
-  }
-
-  return muzzlePoint.addScaledVector(forward, 0.12);
+  return position.clone().add(localOffset.applyQuaternion(bodyOrientation));
 }
 
 function getShotMuzzleAndDirection() {
@@ -2129,6 +2090,22 @@ function fireShot() {
   }
 }
 
+function showMuzzleFlash(muzzle, direction, weapon) {
+  const isCannon = weapon === 'cannon';
+  muzzleFlashDuration = isCannon ? 0.13 : 0.075;
+  muzzleFlashPeakIntensity = isCannon ? 34 : 17;
+  muzzleFlashLife = muzzleFlashDuration;
+  muzzleFlash.position.copy(muzzle);
+  muzzleFlash.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction);
+  muzzleFlash.scale.set(isCannon ? 1.25 : 0.72, isCannon ? 1.8 : 1.25, isCannon ? 1.25 : 0.72);
+  muzzleFlash.material.color.setHex(isCannon ? 0xff8838 : 0xffd56a);
+  muzzleFlash.material.opacity = 0.95;
+  muzzleFlashLight.position.copy(muzzle);
+  muzzleFlashLight.color.setHex(isCannon ? 0xff8a36 : 0xffd56a);
+  muzzleFlashLight.intensity = muzzleFlashPeakIntensity;
+  muzzleFlash.visible = true;
+}
+
 function createProjectile(shot, authoritative = false) {
   if (!shot || !Array.isArray(shot.muzzle) || !Array.isArray(shot.velocity) ||
       ![...shot.muzzle, ...shot.velocity].every(Number.isFinite)) return null;
@@ -2139,8 +2116,9 @@ function createProjectile(shot, authoritative = false) {
   const projectileVelocity = new THREE.Vector3().fromArray(shot.velocity);
   if (projectileVelocity.lengthSq() < 1) return null;
   const isCannon = weapon === 'cannon';
-  const radius = isCannon ? 0.22 : 0.075;
-  const color = isCannon ? 0xffa33a : 0xffe7a0;
+  showMuzzleFlash(muzzle, projectileVelocity.clone().normalize(), weapon);
+  const radius = isCannon ? 0.22 : 0.045;
+  const color = isCannon ? 0xffa33a : 0xfff2c2;
   const projectileMesh = new THREE.Mesh(
     new THREE.SphereGeometry(radius, isCannon ? 12 : 7, isCannon ? 8 : 5),
     new THREE.MeshBasicMaterial({ color, toneMapped: false })
@@ -2151,7 +2129,7 @@ function createProjectile(shot, authoritative = false) {
   const trailMaterial = new THREE.LineBasicMaterial({
     color,
     transparent: true,
-    opacity: isCannon ? 0.85 : 0.75,
+    opacity: isCannon ? 0.72 : 0.62,
     depthWrite: false
   });
   const trailGeometry = new THREE.BufferGeometry().setFromPoints([muzzle, muzzle]);
@@ -2334,8 +2312,15 @@ function updateShots(dt) {
       }
 
       shot.mesh.position.copy(shot.position);
-      shot.trail.geometry.setFromPoints([shot.start, shot.position]);
-      shot.trail.material.opacity = shot.weapon === 'cannon' ? 0.65 : 0.42;
+      // A short streak reads as a fast tracer without leaving a long beam
+      // across the whole flight path.
+      const tracerLength = shot.weapon === 'cannon' ? 4.2 : 2.4;
+      const trailStart = shot.position.clone().addScaledVector(
+        shot.velocity.clone().normalize(),
+        -Math.min(tracerLength, shot.position.distanceTo(shot.start))
+      );
+      shot.trail.geometry.setFromPoints([trailStart, shot.position]);
+      shot.trail.material.opacity = shot.weapon === 'cannon' ? 0.58 : 0.52;
     }
 
     if (shot.life <= 0) {
@@ -2345,6 +2330,16 @@ function updateShots(dt) {
       removeProjectile(shot);
       projectiles.splice(i, 1);
     }
+  }
+  if (muzzleFlashLife > 0) {
+    muzzleFlashLife = Math.max(0, muzzleFlashLife - dt);
+    const progress = muzzleFlashLife / muzzleFlashDuration;
+    muzzleFlash.material.opacity = progress * progress * 0.95;
+    muzzleFlash.scale.multiplyScalar(1 + dt * 8);
+    muzzleFlashLight.intensity = progress * muzzleFlashPeakIntensity;
+  } else {
+    muzzleFlash.material.opacity = 0;
+    muzzleFlashLight.intensity = 0;
   }
 }
 
@@ -2435,9 +2430,9 @@ function startFlight() {
 
     const initialDirection = getAimDirection();
     flightAimDirection.copy(initialDirection).normalize();
-    flightAimTargetDirection.copy(aimDirection);
-    flightAimTargetPitch = aimPitch;
     updateFlightAimFromSurfaceAngles();
+    flightAimTargetDirection.copy(flightAimDirection);
+    flightAimTargetUp.copy(flightAimUp);
 
     flightVelocity.copy(normal)
       .multiplyScalar(FLIGHT_PUSH_OFF)
@@ -2974,9 +2969,9 @@ function update(dt) {
           aimDirection.copy(movement).projectOnPlane(normal).normalize();
           if (aimDirection.lengthSq() < 0.001) aimDirection.copy(heading);
           aimPitch = 0;
-          flightAimTargetDirection.copy(aimDirection);
-          flightAimTargetPitch = 0;
           updateFlightAimFromSurfaceAngles();
+          flightAimTargetDirection.copy(flightAimDirection);
+          flightAimTargetUp.copy(flightAimUp);
           flightState = 'drifting';
           freeFallStarted = false;
           showMessage('FREE FLOAT — SPACE TO THRUST — PRESS LEFT CTRL TO RE-ENGAGE');
@@ -3043,7 +3038,6 @@ function update(dt) {
 
   if (firstPerson) {
     if (!airborneLook) camera.up.lerp(normal, 1 - Math.exp(-16 * dt));
-    clearCameraOcclusion();
     const fpPosition = position.clone().addScaledVector(normal, ballRadius * 1.65);
     camera.position.lerp(fpPosition, 1 - Math.exp(-16 * dt));
     const fpLookTarget = camera.position.clone().addScaledVector(viewDirection, 20);
@@ -3052,14 +3046,15 @@ function update(dt) {
   } else if (airborneLook) {
     // Lock the third-person camera to the turret's aim frame. Position and
     // viewing direction rotate together, with a little follow-through.
-    const desiredCamera = position.clone()
-      .addScaledVector(viewDirection, -thirdPersonDistance)
+    const cameraAnchor = position.clone()
       .addScaledVector(getFlightUp(), CAMERA_HEIGHT * thirdPersonDistance / CAMERA_DISTANCE);
+    const desiredCamera = cameraAnchor.clone()
+      .addScaledVector(viewDirection, -thirdPersonDistance);
     const desiredLookTarget = position.clone().addScaledVector(viewDirection, 20);
     const cameraFollow = 1 - Math.exp(-FLIGHT_CAMERA_RESPONSE * dt);
-    camera.position.lerp(desiredCamera, cameraFollow);
+    const cameraTarget = resolveCameraCollision(cameraAnchor, desiredCamera);
+    camera.position.lerp(cameraTarget, cameraFollow);
     cameraLookTarget.lerp(desiredLookTarget, cameraFollow);
-    updateCameraOcclusion();
     camera.lookAt(cameraLookTarget);
   } else {
     // Track the turret in the same aim-relative frame in both drive and flight.
@@ -3078,19 +3073,22 @@ function update(dt) {
       .normalize();
     const cameraFollow = 1 - Math.exp(-FLIGHT_CAMERA_RESPONSE * dt);
     camera.up.lerp(driveCameraUp, cameraFollow).normalize();
-    const desiredCamera = position.clone()
-      .addScaledVector(viewDirection, -thirdPersonDistance)
-      .addScaledVector(driveCameraUp, CAMERA_HEIGHT * thirdPersonDistance / CAMERA_DISTANCE);
+    const cameraAnchor = position.clone()
+      .addScaledVector(normal, CAMERA_HEIGHT * thirdPersonDistance / CAMERA_DISTANCE);
+    const desiredCamera = cameraAnchor.clone()
+      .addScaledVector(viewDirection, -thirdPersonDistance);
     const desiredLookTarget = position.clone().addScaledVector(viewDirection, 20);
-    camera.position.lerp(desiredCamera, cameraFollow);
+    const cameraTarget = resolveCameraCollision(cameraAnchor, desiredCamera);
+    camera.position.lerp(cameraTarget, cameraFollow);
     cameraLookTarget.lerp(desiredLookTarget, cameraFollow);
-    updateCameraOcclusion();
     camera.lookAt(cameraLookTarget);
   }
 
   if (thrusterMesh) {
-    // Only show the GLB thruster while Space is actively applying thrust.
-    thrusterMesh.visible = flightState === 'flying' && flightSpaceHeld;
+    // Keep the group (and light nodes) present so first thrust cannot add
+    // lights to the scene and trigger a shader recompilation.
+    thrusterMesh.visible = true;
+    setThrusterEffectsActive(flightState === 'flying' && flightSpaceHeld);
 
     if (thrusterBasePosition) thrusterMesh.position.copy(thrusterBasePosition);
     if (thrusterBaseQuaternion) thrusterMesh.quaternion.copy(thrusterBaseQuaternion);
@@ -3149,7 +3147,6 @@ function update(dt) {
 // ============================================================
 
 function setViewMode(fp) {
-
   firstPerson = fp;
   tankRoot.visible = !fp;
 
@@ -3251,21 +3248,26 @@ document.addEventListener('mousemove', event => {
   const pitch = -event.movementY * MOUSE_SENSITIVITY;
 
   if (flightState === 'flying' || flightState === 'drifting') {
-    // Aim in the currently rolled camera frame, so Q/E roll also rotates the
-    // mouse's yaw and pitch axes around the tank's ball.
-    const rolledUp = getFlightUp();
+    // Rotate the full target frame so yaw remains well-defined even when the
+    // tank looks straight up or down.
+    const targetDirection = flightAimTargetDirection.clone();
+    const targetUp = flightAimTargetUp.clone();
+    const rolledUp = targetUp.clone().applyAxisAngle(targetDirection, flightRoll);
+    const yawRotation = new THREE.Quaternion().setFromAxisAngle(rolledUp, yaw);
+    targetDirection.applyQuaternion(yawRotation).normalize();
+    targetUp.applyQuaternion(yawRotation).normalize();
+
     const pitchRight = new THREE.Vector3()
-      .crossVectors(flightAimDirection, rolledUp)
+      .crossVectors(targetDirection, rolledUp)
       .normalize()
-      .applyAxisAngle(rolledUp, yaw);
-    const targetDirection = flightAimTargetDirection.clone()
-      .multiplyScalar(Math.cos(flightAimTargetPitch))
-      .addScaledVector(normal, Math.sin(flightAimTargetPitch))
+      .applyQuaternion(yawRotation)
       .normalize();
-    targetDirection.applyAxisAngle(rolledUp, yaw)
-      .applyAxisAngle(pitchRight, pitch)
-      .normalize();
-    setFlightAimTargetFromDirection(targetDirection);
+    const pitchRotation = new THREE.Quaternion().setFromAxisAngle(pitchRight, pitch);
+    targetDirection.applyQuaternion(pitchRotation).normalize();
+    targetUp.applyQuaternion(pitchRotation).normalize();
+
+    flightAimTargetDirection.copy(targetDirection);
+    flightAimTargetUp.copy(targetUp);
   } else if (flightState === 'attached') {
     // Surface mode stays constrained to the current magnetized surface.
     aimDirection.applyAxisAngle(normal, yaw)
@@ -3389,9 +3391,11 @@ function animate() {
   const dt = Math.min(clock.getDelta(), 0.04);
 
   update(dt);
+  if (levelAnimationMixer && !gamePaused) levelAnimationMixer.update(dt);
 
   updateRemoteTanks(dt);
   updatePlayerHealthBars();
+  updateBodyCrosshair();
   if (multiplayerPeer && multiplayerSessionId) {
     multiplayerSendAccumulator += dt;
     if (multiplayerSendAccumulator >= 1 / 15 && ballMesh) {
