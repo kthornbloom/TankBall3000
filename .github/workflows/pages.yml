@@ -23,7 +23,8 @@ jobs:
       - name: Prepare static game files
         run: |
           mkdir -p dist/assets
-          cp index.html styles.css dist/
+          cp index.html menu.js game.js tank-preview.js styles.css dist/
+          cp -R data dist/data
           cp -R assets/audio assets/levels assets/tanks dist/assets/
           find dist/assets -type f \( -name '*.blend' -o -name '*.blend1' -o -name '*.hdr' \) -delete
           touch dist/.nojekyll
