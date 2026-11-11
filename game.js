@@ -325,7 +325,9 @@ let ballMesh = null;
 let bodyGroup = null;
 let tankModelTemplate = null;
 let localTankFadeMaterials = [];
+const remoteTankTemplates = new Map();
 const remoteTanks = new Map();
+const playerTankIds = new Map();
 const playerHealthBars = new Map();
 let multiplayerPeer = null;
 let multiplayerSessionId = null;
@@ -1230,6 +1232,7 @@ loader.load(TANK_URL, gltf => {
   model.scale.setScalar(MODEL_SCALE);
   configureImportedLights(model);
   tankModelTemplate = model.clone(true);
+  remoteTankTemplates.set(DEFAULT_TANK_ID, tankModelTemplate);
   tankRoot.add(model);
   tankRoot.visible = !firstPerson;
 
@@ -1281,7 +1284,7 @@ loader.load(TANK_URL, gltf => {
   }
 
   for (const [sessionId, remote] of remoteTanks) {
-    if (!remote.root.children.length) attachRemoteModel(remote);
+    attachRemoteModel(remote);
     if (remote.health <= 0 && remote.hasPose) createTankDestruction(sessionId, remote.root);
   }
 
@@ -1485,17 +1488,50 @@ function updateTankTransform() {
 // Remote tanks are visual replicas. Each player still simulates movement locally;
 // the room host relays poses between peers over WebRTC.
 function attachRemoteModel(remote) {
-  if (!tankModelTemplate || remote.root.children.length) return;
-  const model = tankModelTemplate.clone(true);
+  const tankId = remote.tankId || DEFAULT_TANK_ID;
+  if (remote.modelTankId === tankId || remote.loadingTankId === tankId) return;
+  if (remote.model) remote.root.remove(remote.model);
+  remote.model = null;
+  remote.modelTankId = null;
   remote.body = null;
-  model.traverse(object => {
-    if (object.name === 'Body') remote.body = object;
-    if (object.name && object.name.toLowerCase() === 'magnets') {
-      remote.magnets = object;
-      object.visible = remote.magnetsActive;
-    }
+  remote.magnets = null;
+
+  const addModel = template => {
+    if (remoteTanks.get(remote.sessionId) !== remote || remote.tankId !== tankId) return;
+    const model = template.clone(true);
+    remote.body = null;
+    model.traverse(object => {
+      if (object.name === 'Body') remote.body = object;
+      if (object.name && object.name.toLowerCase() === 'magnets') {
+        remote.magnets = object;
+        object.visible = remote.magnetsActive;
+      }
+    });
+    remote.model = model;
+    remote.modelTankId = tankId;
+    remote.root.add(model);
+  };
+
+  const template = remoteTankTemplates.get(tankId);
+  if (template) {
+    addModel(template);
+    return;
+  }
+
+  const tank = TANKS[tankId] || DEFAULT_TANK;
+  remote.loadingTankId = tankId;
+  loader.load(tank.model, gltf => {
+    const loaded = gltf.scene;
+    loaded.scale.setScalar(MODEL_SCALE);
+    configureImportedLights(loaded);
+    const loadedTemplate = loaded.clone(true);
+    remoteTankTemplates.set(tankId, loadedTemplate);
+    if (remote.loadingTankId === tankId) remote.loadingTankId = null;
+    addModel(loadedTemplate);
+  }, undefined, error => {
+    if (remote.loadingTankId === tankId) remote.loadingTankId = null;
+    console.error(`Could not load remote ${tank.name} model:`, error);
   });
-  remote.root.add(model);
 }
 
 function ensureRemoteTank(sessionId) {
@@ -1505,7 +1541,12 @@ function ensureRemoteTank(sessionId) {
     const root = new THREE.Group();
     scene.add(root);
     remote = {
+      sessionId,
       root,
+      tankId: playerTankIds.get(sessionId) || DEFAULT_TANK_ID,
+      model: null,
+      modelTankId: null,
+      loadingTankId: null,
       body: null,
       magnets: null,
       magnetsActive: true,
@@ -1528,6 +1569,16 @@ function ensureRemoteTank(sessionId) {
     attachRemoteModel(remote);
   }
   return remote;
+}
+
+function setRemoteTankType(sessionId, tankId) {
+  if (typeof sessionId !== 'string' || !Object.hasOwn(TANKS, tankId)) return;
+  playerTankIds.set(sessionId, tankId);
+  if (sessionId === multiplayerSessionId) return;
+  const remote = ensureRemoteTank(sessionId);
+  if (!remote) return;
+  remote.tankId = tankId;
+  attachRemoteModel(remote);
 }
 
 function applyRemotePose(sessionId, pose, sequence = 0) {
@@ -1622,6 +1673,27 @@ function applyRemoteTankImpact(sessionId, hitDirection) {
   if (axis.lengthSq() > 0.0001) {
     remote.hitRockAxis.copy(axis.normalize());
     remote.hitRockVelocity += 6.2;
+  }
+}
+
+function applyLocalTankImpact(hitDirection) {
+  if (!Array.isArray(hitDirection) || !hitDirection.every(Number.isFinite) || localTankHealth <= 0) return;
+  const direction = new THREE.Vector3().fromArray(hitDirection);
+  const up = flightState === 'attached'
+    ? normal.clone().normalize()
+    : new THREE.Vector3(0, 1, 0).applyQuaternion(tankRoot.quaternion).normalize();
+  direction.projectOnPlane(up);
+  if (direction.lengthSq() < 0.0001) direction.set(...hitDirection);
+  direction.normalize();
+
+  if (flightState === 'attached') {
+    const right = new THREE.Vector3().crossVectors(heading, normal).normalize();
+    forwardSpeed += direction.dot(heading) * 8.5;
+    strafeSpeed += direction.dot(right) * 8.5;
+  } else if (flightState === 'flying' || flightState === 'drifting') {
+    flightVelocity.addScaledVector(direction, 8.5);
+  } else {
+    reattachVelocity.addScaledVector(direction, 8.5);
   }
 }
 
@@ -1807,7 +1879,7 @@ function setNetworkStatus(message) {
 function updatePeerCount() {
   const count = multiplayerHost ? peerConnections.size + 1 : null;
   if (count !== null) {
-    setNetworkStatus(`Hosting · ${count}/4 players · code ${multiplayerSessionId}`);
+    setNetworkStatus(`Hosting · ${count}/4 players`);
     for (const connection of peerConnections.values()) {
       if (connection.open) connection.send({ type: 'room-count', count });
     }
@@ -1831,6 +1903,7 @@ function removeRemoteTank(sessionId) {
   remoteTanks.delete(sessionId);
   multiplayerPoses.delete(sessionId);
   playerHealth.delete(sessionId);
+  playerTankIds.delete(sessionId);
   remoteMinigunPlayers.delete(sessionId);
   if (!remoteMinigunPlayers.size && !fireHeld) stopMinigunAudio();
 }
@@ -2207,6 +2280,16 @@ function handleRemoteContact(message) {
 function handlePeerMessage(connection, message) {
   if (!message || typeof message !== 'object') return;
 
+  if (message.type === 'room-info-request' && multiplayerHost) {
+    connection.send({ type: 'room-config', levelId: DEFAULT_LEVEL_ID });
+    return;
+  }
+
+  if (message.type === 'tank-selected' && typeof message.sessionId === 'string') {
+    setRemoteTankType(message.sessionId, message.tankId);
+    return;
+  }
+
   if (message.type === 'boundary-destroyed' && multiplayerHost) {
     const remote = remoteTanks.get(connection.peer);
     if (!remote || remote.health <= 0) return;
@@ -2339,13 +2422,19 @@ function handlePeerMessage(connection, message) {
     multiplayerPeer?.destroy();
     multiplayerPeer = null;
     multiplayerSessionId = null;
-    el('join-game').disabled = false;
   } else if (message.type === 'respawn' && multiplayerHost) {
     updateTankHealth(connection.peer, MAX_PLAYER_HEALTH);
     broadcastToPeers({ type: 'tank-health', sessionId: connection.peer, health: MAX_PLAYER_HEALTH });
   } else if (message.type === 'hello' && multiplayerHost) {
+    const tankId = Object.hasOwn(TANKS, message.tankId) ? message.tankId : DEFAULT_TANK_ID;
+    setRemoteTankType(connection.peer, tankId);
+    broadcastToPeers({ type: 'tank-selected', sessionId: connection.peer, tankId }, connection.peer);
+    connection.send({ type: 'room-config', levelId: DEFAULT_LEVEL_ID });
     for (const [sessionId, health] of playerHealth) {
       connection.send({ type: 'tank-health', sessionId, health });
+    }
+    for (const [sessionId, selectedTankId] of playerTankIds) {
+      connection.send({ type: 'tank-selected', sessionId, tankId: selectedTankId });
     }
     for (const [sessionId, state] of multiplayerPoses) {
       connection.send({
@@ -2360,6 +2449,8 @@ function handlePeerMessage(connection, message) {
 }
 
 function attachPeerConnection(connection, incoming = false) {
+  if (connection.tankBallAttached) return;
+  connection.tankBallAttached = true;
   if (incoming && peerConnections.size >= 3) {
     connection.on('open', () => {
       connection.send({ type: 'room-full' });
@@ -2370,9 +2461,12 @@ function attachPeerConnection(connection, incoming = false) {
 
   if (incoming) peerConnections.set(connection.peer, connection);
   connection.on('data', message => handlePeerMessage(connection, message));
-  connection.on('open', () => {
+  const onOpen = () => {
+    if (connection.tankBallOpenHandled) return;
+    connection.tankBallOpenHandled = true;
     peerConnections.set(connection.peer, connection);
     if (multiplayerHost) {
+      connection.send({ type: 'room-config', levelId: DEFAULT_LEVEL_ID });
       playerHealth.set(connection.peer, MAX_PLAYER_HEALTH);
       connection.send({ type: 'tank-health', sessionId: connection.peer, health: MAX_PLAYER_HEALTH });
       connection.send({ type: 'tank-health', sessionId: multiplayerSessionId, health: localTankHealth });
@@ -2387,13 +2481,18 @@ function attachPeerConnection(connection, incoming = false) {
           type: 'pose', sessionId, pose: state.pose, sequence: state.sequence
         });
       }
+      for (const [sessionId, tankId] of playerTankIds) {
+        connection.send({ type: 'tank-selected', sessionId, tankId });
+      }
       updatePeerCount();
     } else {
       hostConnection = connection;
-      connection.send({ type: 'hello' });
+      connection.send({ type: 'hello', tankId: GAME_SELECTION.tankId || DEFAULT_TANK_ID });
       setNetworkStatus('Connected to host · syncing tanks…');
     }
-  });
+  };
+  connection.on('open', onOpen);
+  if (connection.open) onOpen();
   connection.on('close', () => {
     peerConnections.delete(connection.peer);
     if (!multiplayerSessionId) return;
@@ -2442,10 +2541,11 @@ async function hostMultiplayerGame() {
     peer.on('open', id => {
       multiplayerSessionId = id;
       playerHealth.set(id, localTankHealth);
+      playerTankIds.set(id, DEFAULT_TANK_ID);
       el('host-room-code').textContent = id;
       el('multiplayer-panel').hidden = false;
       multiplayerPoses.set(id, { pose: localTankPose(), sequence: 0 });
-      setNetworkStatus(`Hosting · 1/4 players · code ${id}`);
+      setNetworkStatus('Hosting · 1/4 players');
     });
     peer.on('connection', connection => attachPeerConnection(connection, true));
     peer.on('error', error => {
@@ -2470,9 +2570,15 @@ async function joinMultiplayerGame() {
     return;
   }
   startGame('join');
-  el('join-game').disabled = true;
   setNetworkStatus('Connecting to host…');
   try {
+    if (GAME_SELECTION.peer && GAME_SELECTION.hostConnection) {
+      multiplayerPeer = GAME_SELECTION.peer;
+      multiplayerHost = false;
+      multiplayerSessionId = multiplayerPeer.id;
+      attachPeerConnection(GAME_SELECTION.hostConnection);
+      return;
+    }
     const peer = await createPeer();
     multiplayerPeer = peer;
     multiplayerHost = false;
@@ -2490,12 +2596,10 @@ async function joinMultiplayerGame() {
       peer.destroy();
       multiplayerPeer = null;
       multiplayerSessionId = null;
-      el('join-game').disabled = false;
     });
   } catch (error) {
     console.error('Could not join PeerJS room:', error);
     setNetworkStatus('Could not load the free WebRTC connection service');
-    el('join-game').disabled = false;
   }
 }
 
@@ -3094,8 +3198,9 @@ function acceptRemoteShot(sessionId, message) {
 function finishRemoteProjectile(message) {
   const shotIndex = projectiles.findIndex(projectile => projectile.kind === 'projectile' && projectile.shotId === message.shotId);
   const shot = shotIndex >= 0 ? projectiles[shotIndex] : null;
-  if (message.weapon === 'cannon' && message.targetId !== multiplayerSessionId) {
-    applyRemoteTankImpact(message.targetId, message.hitDirection);
+  if (message.weapon === 'cannon' && message.health > 0) {
+    if (message.targetId === multiplayerSessionId) applyLocalTankImpact(message.hitDirection);
+    else applyRemoteTankImpact(message.targetId, message.hitDirection);
   }
   if (shot?.ownerId === multiplayerSessionId && message.targetId && message.weapon === 'cannon') {
     flashPrimaryReticle();
@@ -3322,8 +3427,9 @@ function updateShots(dt) {
           updateTankHealth(tankHit.targetId, health);
           if (multiplayerHost) broadcastToPeers({ type: 'tank-health', sessionId: tankHit.targetId, health });
           if (health <= 0) broadcastTankDestroyed(tankHit.targetId);
-          if (shot.weapon === 'cannon' && tankHit.targetId !== multiplayerSessionId) {
-            applyRemoteTankImpact(tankHit.targetId, shot.velocity.toArray());
+          if (shot.weapon === 'cannon' && health > 0) {
+            if (tankHit.targetId === multiplayerSessionId) applyLocalTankImpact(shot.velocity.toArray());
+            else applyRemoteTankImpact(tankHit.targetId, shot.velocity.toArray());
           }
           if (shot.ownerId === multiplayerSessionId && tankHit.targetId !== multiplayerSessionId && shot.weapon === 'cannon') {
             flashPrimaryReticle();

@@ -30,6 +30,69 @@ let tankIds = Object.entries(TANKS)
   .map(([key]) => key);
 let tankIndex = Math.max(0, tankIds.indexOf(DEFAULT_TANK_ID));
 let tankPreview = null;
+let pendingJoinPeer = null;
+let pendingJoinConnection = null;
+
+function closePendingJoin() {
+  pendingJoinPeer?.destroy();
+  pendingJoinPeer = null;
+  pendingJoinConnection = null;
+  window.tankGamePeer = null;
+  window.tankGameHostConnection = null;
+}
+
+async function connectToRoom(roomCode) {
+  const { Peer } = await import('peerjs');
+  const peer = new Peer({ config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] } });
+  pendingJoinPeer = peer;
+
+  return new Promise((resolve, reject) => {
+    let connection = null;
+    let settled = false;
+    const timeout = window.setTimeout(() => fail(new Error('Host did not respond. Check the code and try again.')), 15000);
+    const cleanupListeners = () => {
+      window.clearTimeout(timeout);
+      if (connection) {
+        connection.off('data', onData);
+        connection.off('error', onConnectionError);
+      }
+      peer.off('error', onPeerError);
+    };
+    const fail = error => {
+      if (settled) return;
+      settled = true;
+      cleanupListeners();
+      closePendingJoin();
+      reject(error);
+    };
+    const onConnectionError = error => fail(new Error(error.type === 'peer-unavailable'
+      ? 'Room not found. Check the code and try again.'
+      : 'Could not connect to that room. Try again.'));
+    const onPeerError = () => fail(new Error('Could not reach the room service. Try again.'));
+    const onData = message => {
+      if (settled) return;
+      if (message?.type === 'room-full') {
+        fail(new Error('That room is full. Try another room code.'));
+        return;
+      }
+      if (message?.type !== 'room-config') return;
+      settled = true;
+      cleanupListeners();
+      window.tankGamePeer = peer;
+      window.tankGameHostConnection = connection;
+      resolve({ levelId: LEVELS[message.levelId] ? message.levelId : DEFAULT_LEVEL_ID });
+    };
+
+    peer.on('error', onPeerError);
+    peer.on('open', () => {
+      connection = peer.connect(roomCode, { reliable: true, serialization: 'json' });
+      pendingJoinConnection = connection;
+      connection.on('data', onData);
+      connection.on('error', onConnectionError);
+      connection.on('open', () => connection.send({ type: 'room-info-request' }));
+    });
+  });
+}
 
 function showScreen(screenId, animate = true) {
   const next = byId(screenId);
@@ -114,6 +177,7 @@ function renderTankDetails() {
   byId('tank-name').textContent = tank.name;
   byId('tank-description').textContent = tank.description;
   byId('tank-position').textContent = `${tankIndex + 1} / ${tankIds.length}`;
+  byId('tank-back').textContent = mode === 'join' ? '‹ BACK TO ROOM CODE' : '‹ BACK TO LEVELS';
   const stats = [
     ['TURRET HEALTH', tank.turretHealth, 150], ['BALL HEALTH', tank.ballHealth, 150],
     ['BOOST POWER', tank.boostStrength, 14], ['BOOST TIME', tank.boostTime, 2],
@@ -175,13 +239,28 @@ byId('menu-join').addEventListener('click', () => {
   byId('room-code').focus();
 });
 byId('back-to-menu').addEventListener('click', () => {
+  closePendingJoin();
+  byId('join-status').textContent = '';
   byId('join-form').hidden = true;
   document.querySelector('.landing-actions').hidden = false;
 });
-byId('continue-join').addEventListener('click', () => {
+byId('continue-join').addEventListener('click', async () => {
   const code = byId('room-code').value.trim().toUpperCase();
   if (!code) { byId('room-code').focus(); return; }
-  showLevels('join');
+  const button = byId('continue-join');
+  button.disabled = true;
+  byId('join-status').textContent = 'CONNECTING TO HOST…';
+  try {
+    const room = await connectToRoom(code);
+    mode = 'join';
+    selectedLevelId = room.levelId;
+    byId('join-status').textContent = '';
+    await showTankPicker();
+  } catch (error) {
+    byId('join-status').textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
 });
 byId('room-code').addEventListener('keydown', event => {
   if (event.key === 'Enter') byId('continue-join').click();
@@ -200,7 +279,11 @@ byId('level-next').addEventListener('click', () => changeLevel(1));
 byId('level-select').addEventListener('click', selectLevel);
 window.addEventListener('keydown', event => {
   if (event.key === 'Escape' && !document.fullscreenElement) {
-    if (!byId('tank-screen').hidden) { showScreen('level-screen'); event.preventDefault(); return; }
+    if (!byId('tank-screen').hidden) {
+      byId('tank-back').click();
+      event.preventDefault();
+      return;
+    }
     if (!byId('level-screen').hidden) {
       if (mode === 'join') showScreen('start-screen').then(() => { byId('join-form').hidden = false; document.querySelector('.landing-actions').hidden = true; });
       else showScreen('start-screen');
@@ -220,7 +303,15 @@ window.addEventListener('keydown', event => {
     selectLevel();
   }
 });
-byId('tank-back').addEventListener('click', () => showScreen('level-screen'));
+byId('tank-back').addEventListener('click', () => {
+  if (mode === 'join') {
+    closePendingJoin();
+    showScreen('start-screen').then(() => {
+      byId('join-form').hidden = false;
+      document.querySelector('.landing-actions').hidden = true;
+    });
+  } else showScreen('level-screen');
+});
 byId('tank-previous').addEventListener('click', () => {
   tankIndex = (tankIndex - 1 + tankIds.length) % tankIds.length;
   renderTankDetails();
@@ -244,13 +335,16 @@ byId('confirm-tank').addEventListener('click', async () => {
     mode,
     roomCode: byId('room-code').value.trim().toUpperCase(),
     levelId: selectedLevelId || DEFAULT_LEVEL_ID,
-    tankId: tankIds[tankIndex]
+    tankId: tankIds[tankIndex],
+    peer: mode === 'join' ? pendingJoinPeer : null,
+    hostConnection: mode === 'join' ? pendingJoinConnection : null
   };
   try {
     await import('./game.js');
     tankPreview?.dispose();
   } catch (error) {
     console.error('Could not start game:', error);
+    if (mode === 'join') closePendingJoin();
     byId('game-loading').hidden = true;
     byId('tank-loading-status').textContent = 'The game could not load. Check the console for details.';
     button.disabled = false;

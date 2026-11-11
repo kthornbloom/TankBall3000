@@ -113,7 +113,6 @@ body.game-started #message { visibility: visible; }
   letter-spacing: .15em;
   text-transform: uppercase;
 }
-#join-game { min-width: 92px; }
 #join-form .menu-back { width: 100%; margin-top: 10px; background: transparent; }
 
 #hud, #help {
@@ -306,29 +305,6 @@ body.first-person #crosshair {
   font-size: 12px;
 }
 #network-status.visible { display: block; }
-#multiplayer-panel {
-  position: fixed;
-  left: 16px;
-  bottom: 76px;
-  z-index: 8;
-  width: min(350px, calc(100vw - 32px));
-  padding: 11px 12px;
-  color: white;
-  background: #101720e8;
-  border: 1px solid #ffffff30;
-  border-radius: 8px;
-  font-size: 12px;
-}
-#multiplayer-panel button {
-  padding: 9px 12px;
-  color: white;
-  background: #426b86;
-  border: 0;
-  border-radius: 4px;
-  cursor: pointer;
-}
-#multiplayer-panel[hidden] { display: none; }
-#host-room-code { display: inline-block; background: #ffffff12; }
 kbd {
   border: 1px solid #ffffff55;
   border-radius: 3px;
@@ -846,16 +822,29 @@ kbd {
   transform: translateY(-3px);
 }
 #start-screen #join-form {
-  position: absolute;
-  right: clamp(20px, 12vw, 190px);
-  bottom: clamp(28px, 8vh, 92px);
-  left: clamp(20px, 12vw, 190px);
-  padding: 20px;
-  background: #a8080dcc;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  right: auto;
+  bottom: auto;
+  width: min(390px, calc(100vw - 36px));
+  padding: 28px;
+  transform: translate(-50%, -50%);
+  color: #111;
+  background: #fff;
+  border: 1px solid #ddd;
+  box-shadow: 0 18px 70px #0008;
+  z-index: 20;
 }
 #start-screen #join-form[hidden] { display: none; }
-#start-screen #join-form label { font-family: var(--menu-title); font-size: 16px; }
-#start-screen #join-form button { padding-inline: 14px; text-align: center; }
+#start-screen #join-form label { margin-bottom: 14px; color: #111; font: 18px var(--menu-title); letter-spacing: .01em; }
+#start-screen #join-form .join-controls { display: grid; grid-template-columns: 1fr; gap: 10px; }
+#start-screen #join-form #room-code { width: 100%; padding: 13px 12px; color: #111; background: #fff; border: 1px solid #111; border-radius: 0; font: 700 20px ui-monospace,monospace; }
+#start-screen #join-form #room-code::placeholder { color: #777; }
+#start-screen #join-form button { padding-inline: 14px; color: #fff; background: #111; border: 1px solid #111; border-radius: 0; text-align: center; }
+#start-screen #join-form button:hover { color: #fff; background: #333; }
+#start-screen #join-form .menu-back { margin-top: 8px; }
+#join-status { min-height: 1.2em; margin: 12px 0 0; color: #444; font: 12px/1.3 Archivo,Arial,sans-serif; }
 .landing-corners { position: absolute; inset: 14px; z-index: 2; pointer-events: none; }
 .landing-corners i {
   position: absolute;
@@ -1199,7 +1188,7 @@ body.game-started #hud { display:grid; }
 body.game-started #hud { display:block; }
 #hud .hud-health,#hud .hud-mag,#hud .hud-speed,#hud .hud-weapons { position:absolute; background:linear-gradient(135deg,#04121abf,#081a26a6); border:1px solid #9ddfff56; box-shadow:0 0 18px #00b7ff16,inset 0 0 18px #00b7ff0a; }
 .hud-eyebrow { color:#9cdcf4; font-size:9px; font-weight:700; letter-spacing:.19em; }
-.hud-health { top:22px; left:50%; width:min(330px,38vw); padding:10px 14px 12px; transform:translateX(-50%); clip-path:polygon(0 0,100% 0,100% 72%,94% 100%,6% 100%,0 72%); }
+.hud-health { top:22px; left:50%; width:min(330px,38vw); padding:10px 14px 12px; transform:translateX(-50%); clip-path:none; }
 .hud-topline { display:flex; align-items:center; justify-content:space-between; }
 .hud-topline strong { color:#fff; font:22px/1 var(--menu-title); letter-spacing:-.03em; }
 .hud-health-track { height:5px; margin-top:8px; background:#8eb8c344; }
@@ -1303,3 +1292,42 @@ body.game-started #hud .hud-health,body.game-started #hud .hud-mag,body.game-sta
 .boost-meter-track { height:12px; border:1px solid #6de3ff; border-radius:0; background:#06131bd9; box-shadow:0 0 12px #19c8ff39,inset 0 0 8px #0cbbff1c; }
 #boost-bar { border-radius:0; background:linear-gradient(90deg,#00a9db,#56e5ff 75%,#c4f8ff); box-shadow:0 0 12px #39d9ffb0; }
 #flight-boost-meter.depleted #boost-bar { background:#08a9d1; box-shadow:inset 0 0 0 1px #73e8ff; }
+
+/* Host code stays attached to the health readout as part of the HUD. */
+#hud #multiplayer-panel {
+  position: static;
+  display: block;
+  width: auto;
+  margin-top: 10px;
+  padding: 9px 0 0;
+  color: #9cdcf4;
+  background: none;
+  border: 0;
+  border-top: 1px solid #9ddfff45;
+  border-radius: 0;
+  font: 700 8px/1.2 Archivo,Arial,sans-serif;
+  letter-spacing: .17em;
+  pointer-events: auto;
+}
+#hud #multiplayer-panel[hidden] { display: none; }
+.hud-room-code-row { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
+#hud #host-room-code {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  color: #fff;
+  background: none;
+  border: 0;
+  font: 21px/1 var(--menu-title);
+  letter-spacing: .16em;
+}
+#hud #copy-room-code {
+  padding: 5px 8px;
+  color: #bceaff;
+  background: #143344a8;
+  border: 1px solid #74c9e85c;
+  font: 700 8px Archivo,Arial,sans-serif;
+  letter-spacing: .1em;
+  cursor: pointer;
+}
+#hud #copy-room-code:hover { color: #07141b; background: #bceaff; }

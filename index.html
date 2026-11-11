@@ -54,6 +54,7 @@
         <input id="room-code" type="text" maxlength="6" placeholder="6-character code" autocomplete="off" autocapitalize="characters" spellcheck="false">
         <button id="continue-join" type="button">CONTINUE</button>
       </div>
+      <p id="join-status" aria-live="polite"></p>
       <button id="back-to-menu" class="menu-back" type="button">BACK</button>
     </div>
   </div>
@@ -126,6 +127,10 @@
   <section class="hud-health" aria-label="Tank health">
     <div class="hud-topline"><span class="hud-eyebrow">TB—3000 / HULL STATUS</span><strong id="tank-health">100%</strong></div>
     <div class="hud-health-track"><div id="hud-health-fill"></div></div>
+    <section id="multiplayer-panel" aria-label="Online multiplayer" hidden>
+      <strong>SHARE ROOM CODE</strong>
+      <div class="hud-room-code-row"><output id="host-room-code"></output><button id="copy-room-code" type="button">COPY</button></div>
+    </section>
   </section>
   <section class="hud-mag" aria-label="Magnet drive status"><span class="mag-icon" aria-hidden="true">✣</span><span><small>MAG DRIVE</small><strong id="mag-status">ONLINE</strong></span><i id="mag-indicator"></i></section>
   <section class="hud-speed" aria-label="Current speed"><span class="hud-eyebrow">GROUND SPEED</span><div><strong id="hud-speed-value">0</strong><small>KM/H</small></div><span class="speed-ticks" aria-hidden="true"></span></section>
@@ -180,14 +185,6 @@
     <button id="pause-respawn" type="button">RESPAWN</button>
     <button id="pause-main-menu" type="button">EXIT TO MAIN MENU</button>
   </div>
-</section>
-<section id="multiplayer-panel" aria-label="Online multiplayer" hidden>
-  <strong>SHARE THIS ROOM CODE</strong>
-  <div class="join-controls">
-    <output id="host-room-code"></output>
-    <button id="copy-room-code" type="button">COPY</button>
-  </div>
-  <button id="join-game" type="button" hidden>JOIN</button>
 </section>
 <script type="module" src="./menu.js?v=20261111-1"></script>
 </body>
