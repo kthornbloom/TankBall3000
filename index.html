@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ball Tank</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css">
 
 <script type="importmap">
@@ -20,14 +23,29 @@
 <body>
 
 <section id="start-screen" aria-label="Main menu">
+  <div class="landing-art" aria-hidden="true">
+    <img class="landing-image is-active" src="./assets/menu-images/main-tank.png" alt="">
+    <img class="landing-image" src="./assets/menu-images/scorp.png" alt="">
+    <img class="landing-glitch" src="./assets/menu-images/main-tank.png" alt="">
+  </div>
+  <div class="landing-corners" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
   <div class="start-card" id="mode-card">
     <div class="start-kicker">ARCADE TANK COMBAT</div>
-    <h1>TANKBALL <span>3000</span></h1>
-    <p>Pick a mode and roll out.</p>
-    <div id="menu-options">
-      <button id="menu-join" type="button">JOIN MATCH</button>
-      <button id="menu-host" type="button">HOST MATCH</button>
-      <button id="menu-freeplay" type="button">FREE PLAY</button>
+    <img src="./assets/menu-images/logo.svg" class="landing-logo">
+    <div class="landing-actions">
+      <div class="action-group">
+        <span class="action-label">MULTIPLAYER</span>
+        <div class="action-buttons">
+          <button id="menu-host" type="button">HOST MATCH</button>
+          <button id="menu-join" type="button">JOIN MATCH</button>
+        </div>
+      </div>
+      <div class="action-group">
+        <span class="action-label">SINGLE PLAYER</span>
+        <div class="action-buttons">
+          <button id="menu-freeplay" type="button">FREE PLAY</button>
+        </div>
+      </div>
     </div>
     <div id="join-form" hidden>
       <label for="room-code">ENTER ROOM CODE</label>
@@ -41,13 +59,24 @@
 </section>
 
 <section id="level-screen" aria-label="Choose a level" hidden>
-  <div class="selection-card">
-    <div class="start-kicker">MATCH SETUP · STEP 1</div>
-    <h2>CHOOSE A LEVEL</h2>
-    <p id="level-mode-label"></p>
-    <div id="level-options" class="level-options"></div>
-    <button id="level-back" class="menu-back" type="button">BACK</button>
+  <div class="level-backdrop" aria-hidden="true">
+    <img id="level-art" alt="">
+    <div class="level-backdrop-shade"></div>
   </div>
+  <div class="level-corners" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+  <img class="level-logo" src="./assets/menu-images/logo-small.svg" alt="Tankball 3000">
+  <main class="level-picker-content">
+    <div class="level-mode-badge"><strong id="level-mode-type">MULTIPLAYER</strong><span id="level-mode-note">You’re Hosting</span></div>
+    <h1 id="level-name" aria-live="polite"></h1>
+    <div id="level-adjectives" class="level-adjectives" aria-label="Level characteristics"></div>
+    <div class="level-controls">
+      <button id="level-previous" class="level-arrow" type="button" aria-label="Previous level"><span aria-hidden="true"></span></button>
+      <button id="level-select" class="level-select" type="button">SELECT</button>
+      <button id="level-next" class="level-arrow" type="button" aria-label="Next level"><span aria-hidden="true"></span></button>
+    </div>
+    <div class="level-footer"><span id="level-position" aria-live="polite"></span></div>
+    <button id="level-back" class="level-back-button" type="button"><span aria-hidden="true">‹</span> BACK TO MODES</button>
+  </main>
 </section>
 
 <section id="tank-screen" aria-label="Choose a tank" hidden>
@@ -57,13 +86,16 @@
       <h2 id="tank-name"></h2>
       <p id="tank-description"></p>
       <dl id="tank-stats"></dl>
+      <div class="vehicle-weapons"><div><small>PRIMARY</small><span id="vehicle-primary"></span></div><div><small>SECONDARY</small><span id="vehicle-secondary"></span></div><div><small>SPECIAL</small><span id="vehicle-special"></span></div></div>
       <div class="tank-navigation">
         <button id="tank-previous" type="button" aria-label="Previous tank">‹</button>
         <span id="tank-position"></span>
         <button id="tank-next" type="button" aria-label="Next tank">›</button>
       </div>
-      <button id="confirm-tank" class="primary-action" type="button">START GAME</button>
-      <button id="tank-back" class="menu-back" type="button">BACK TO LEVELS</button>
+      <div class="vehicle-actions">
+        <button id="confirm-tank" class="primary-action" type="button">SELECT VEHICLE</button>
+        <button id="tank-back" class="vehicle-back" type="button"><span aria-hidden="true">‹</span> BACK TO LEVELS</button>
+      </div>
       <p id="tank-loading-status" aria-live="polite"></p>
     </aside>
     <div id="tank-preview" aria-label="Tank preview">
@@ -74,6 +106,8 @@
     </div>
   </div>
 </section>
+
+<div id="screen-wipe" aria-hidden="true"></div>
 
 <div id="hud">
   <strong>BALL TANK</strong><br>
@@ -100,7 +134,7 @@
   Mouse: Aim / Look<br>
   Left click: Fire / hold for MG<br>
   Right click: Hold to zoom<br>
-  <kbd>1</kbd> Primary weapon / <kbd>2</kbd> Secondary weapon<br>
+  <kbd>1</kbd> Main cannon / <kbd>2</kbd> Minigun / <kbd>3</kbd> EMP pulse<br>
   <kbd>C</kbd> First / Third person<br>
   <kbd>Shift</kbd> Ground boost (1 second)<br>
   <kbd>Space</kbd> Detach / hold to thrust (3 seconds total)<br>
@@ -111,18 +145,20 @@
 </div>
 
 <div id="crosshair"><span></span></div>
+<div id="reload-progress-track" aria-hidden="true" hidden><div id="reload-progress"></div></div>
 <div id="reticle-link" aria-hidden="true" hidden></div>
 <div id="body-crosshair" aria-hidden="true"><span></span></div>
 <div id="message"></div>
 <div id="network-status" aria-live="polite"></div>
 <div id="player-health-bars" aria-hidden="true"></div>
 <section id="game-loading" aria-live="polite" hidden>
-  <div class="game-loading-card">
-    <div class="start-kicker">TANKBALL 3000</div>
-    <h2>PREPARING MATCH</h2>
-    <p id="game-loading-status">Loading game modules…</p>
-    <div class="game-loading-track"><div></div></div>
-  </div>
+  <div class="loading-art" aria-hidden="true"><img id="loading-level-art" alt=""></div>
+  <div class="loading-red-tint" aria-hidden="true"></div>
+  <div class="landing-corners loading-corners" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+  <img class="loading-mark" src="./assets/menu-images/logo-small.svg" alt="Tankball 3000">
+  <div class="loading-word" role="img" aria-label="Loading"><span class="loading-word-white">LOADING</span><span class="loading-word-red">LOADING</span></div>
+  <div class="loading-mode-badge"><strong id="loading-mode-type">MULTIPLAYER</strong><span id="loading-mode-note">You’re Hosting</span></div>
+  <p id="game-loading-status" class="loading-status" aria-live="polite">Loading game modules…</p>
 </section>
 <section id="pause-menu" aria-label="Game menu" aria-modal="true" role="dialog" hidden>
   <div class="pause-menu-card">

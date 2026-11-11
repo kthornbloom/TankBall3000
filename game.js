@@ -71,6 +71,7 @@ const MUSIC_TRACKS = [
 ];
 const ENGINE_AUDIO_URL = './assets/audio/engine.ogg';
 const THRUST_AUDIO_URL = './assets/audio/boost.mp3';
+const RELOAD_AUDIO_URL = './assets/audio/reload.mp3';
 
 const DRIVE_COLLISION_THRESHOLD = 3.5;
 const COLLISION_COOLDOWN = 0.3;
@@ -116,6 +117,12 @@ const muzzleFlash = new THREE.Mesh(
   })
 );
 scene.add(muzzleFlash);
+const muzzleFlashRing = new THREE.Mesh(
+  new THREE.TorusGeometry(0.28, 0.035, 6, 24),
+  new THREE.MeshBasicMaterial({ color: 0xffb347, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false })
+);
+muzzleFlashRing.visible = false;
+scene.add(muzzleFlashRing);
 let muzzleFlashLife = 0;
 let muzzleFlashDuration = 0.1;
 let muzzleFlashPeakIntensity = 20;
@@ -286,7 +293,10 @@ const targets = [];
 let selectedWeapon = DEFAULT_TANK.primaryWeapon;
 let fireHeld = false;
 let minigunAccumulator = 0;
-let weaponCooldown = 0;
+const weaponCooldowns = new Map();
+let minigunHeat = 0;
+let minigunOverheated = false;
+let empDisabledRemaining = 0;
 let flightState = 'attached'; // attached, flying, orienting, reattaching
 let thrustRemaining = THRUST_DURATION;
 let thrustRechargeDelayRemaining = 0;
@@ -316,6 +326,9 @@ let thrusterEffectsActive = false;
 const cannonAudio = new Audio(CANNON_AUDIO_URL);
 cannonAudio.preload = 'auto';
 cannonAudio.volume = 0.8;
+const reloadAudio = new Audio(RELOAD_AUDIO_URL);
+reloadAudio.preload = 'auto';
+reloadAudio.volume = 0.62;
 const minigunAudio = new Audio(MINIGUN_AUDIO_URL);
 minigunAudio.preload = 'auto';
 minigunAudio.loop = true;
@@ -457,6 +470,19 @@ function collectMeshes(root) {
   });
 
   return meshes;
+}
+
+function collectCollisionMeshes(root) {
+  const collidableMeshes = [];
+  root.traverse(object => {
+    if (object.isMesh) {
+      if ((object.name || '').trim().toLowerCase().startsWith('col-')) {
+        collidableMeshes.push(object);
+      }
+    }
+  });
+  console.info(`Registered ${collidableMeshes.length} collision mesh(es) with the col- prefix.`);
+  return collidableMeshes;
 }
 
 function registerTargets(root) {
@@ -643,7 +669,7 @@ function startGame(mode) {
 function openGameMenu() {
   if (!gameStarted || pauseMenuOpen) return;
   pauseMenuOpen = true;
-  gamePaused = startupMode === 'freeplay';
+  gamePaused = false;
   el('pause-menu-status').textContent = gamePaused
     ? 'Game paused'
     : 'Online match continues while this menu is open';
@@ -689,6 +715,8 @@ function updateLoadingStatus() {
   else if (!levelReady) status.textContent = 'Loading arena…';
   else if (!tankReady) status.textContent = 'Loading tank…';
   else status.textContent = 'Preparing graphics…';
+  const progress = (environmentReady ? 34 : 8) + (levelReady ? 33 : 0) + (tankReady ? 25 : 0);
+  window.updateGameLoading?.(progress, status.textContent);
 }
 
 async function maybeFinishGameStartup() {
@@ -725,6 +753,7 @@ async function maybeFinishGameStartup() {
   }
 
   startGame(startupMode);
+  window.updateGameLoading?.(100, 'Ready');
   if (startupMode === 'host') hostMultiplayerGame();
   if (startupMode === 'join') joinMultiplayerGame();
 }
@@ -758,7 +787,8 @@ loader.load(LEVEL_URL, gltf => {
     }
   }
   configureImportedLights(gltf.scene);
-  levelMeshes = collectMeshes(gltf.scene);
+  collectMeshes(gltf.scene); // Configure shadows and materials for every visible level mesh.
+  levelMeshes = collectCollisionMeshes(gltf.scene);
   levelSpawnMarkers = [];
   gltf.scene.traverse(object => {
     if (object.name && object.name.toLowerCase().startsWith('start')) {
@@ -1126,6 +1156,11 @@ function showRemoteTankDestruction(message) {
 
 function updateRemoteTanks(dt) {
   for (const remote of remoteTanks.values()) {
+    if (remote.empDisabledRemaining > 0) {
+      remote.empDisabledRemaining = Math.max(0, remote.empDisabledRemaining - dt);
+      if (!remote.empDisabledRemaining && remote.root.userData.empAura) remote.root.userData.empAura.visible = false;
+      if (remote.root.userData.empAura) remote.root.userData.empAura.rotation.y += dt * 2.4;
+    }
     if (!remote.hasPose || remote.health <= 0) continue;
     const blend = 1 - Math.exp(-14 * dt);
     remote.root.position.lerp(remote.targetPosition, blend);
@@ -1331,7 +1366,17 @@ function updatePeerCount() {
 function removeRemoteTank(sessionId) {
   clearTankDestruction(sessionId);
   const remote = remoteTanks.get(sessionId);
-  if (remote) scene.remove(remote.root);
+  if (remote) {
+    const aura = remote.root.userData.empAura;
+    if (aura) {
+      remote.root.remove(aura);
+      aura.traverse(object => {
+        if (object.geometry) object.geometry.dispose();
+        if (object.material) object.material.dispose();
+      });
+    }
+    scene.remove(remote.root);
+  }
   remoteTanks.delete(sessionId);
   multiplayerPoses.delete(sessionId);
   playerHealth.delete(sessionId);
@@ -1595,6 +1640,34 @@ function handlePeerMessage(connection, message) {
     return;
   }
 
+  if (message.type === 'emp-pulse') {
+    if (message.shot?.ownerId !== multiplayerSessionId) createEmpPulse(message.shot, false);
+    return;
+  }
+
+  if (message.type === 'emp-disable') {
+    if (message.sessionId === multiplayerSessionId && Number.isFinite(message.duration)) {
+      empDisabledRemaining = Math.max(empDisabledRemaining, THREE.MathUtils.clamp(message.duration, 0, 10));
+      forwardSpeed = 0;
+      strafeSpeed = 0;
+      flightVelocity.set(0, 0, 0);
+      fireHeld = false;
+      flightSpaceHeld = false;
+      for (const key of ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight', 'Space', 'ControlLeft']) keys[key] = false;
+      stopThrustAudio();
+      stopMinigunAudio();
+      announceWeaponAudio(false);
+      ensureEmpAura(tankRoot).visible = true;
+      showMessage('EMP DISABLED');
+    }
+    const remote = typeof message.sessionId === 'string' ? remoteTanks.get(message.sessionId) : null;
+    if (remote && Number.isFinite(message.duration)) {
+      remote.empDisabledRemaining = Math.max(remote.empDisabledRemaining || 0, THREE.MathUtils.clamp(message.duration, 0, 10));
+      ensureEmpAura(remote.root).visible = true;
+    }
+    return;
+  }
+
   if (message.type === 'weapon-shot') {
     if (message.sessionId !== multiplayerSessionId && message.weapon === 'cannon') playOneShot(cannonAudio);
     return;
@@ -1834,7 +1907,8 @@ function setWeapon(weapon) {
   const definition = WEAPONS[weapon];
   if (!definition) return;
   selectedWeapon = weapon;
-  const slot = weapon === DEFAULT_TANK.primaryWeapon ? 1 : 2;
+  const slot = weapon === DEFAULT_TANK.primaryWeapon ? 1
+    : weapon === DEFAULT_TANK.secondaryWeapon ? 2 : 3;
   el('weapon').textContent = `${definition.name} [${slot}]`;
   minigunAccumulator = 0;
   stopMinigunAudio();
@@ -2054,11 +2128,31 @@ function getTankWorldVelocity() {
 }
 
 function fireShot() {
-  if (!levelMeshes.length || flightState === 'reattaching' || localTankHealth <= 0) return;
+  if (flightState === 'reattaching' || localTankHealth <= 0 || empDisabledRemaining > 0) return;
+  if (selectedWeapon === 'minigun' && minigunOverheated) return;
   const weaponDefinition = WEAPONS[selectedWeapon];
-  if (weaponDefinition.triggerMode === 'single' && weaponCooldown > 0) return;
+  if (weaponDefinition.triggerMode === 'single' && (weaponCooldowns.get(selectedWeapon) || 0) > 0) return;
 
   const { muzzle, direction } = getShotMuzzleAndDirection();
+  if (weaponDefinition.behavior === 'emp') {
+    const center = position.clone();
+    const shot = {
+      shotId: multiplayerPeer ? `${multiplayerSessionId}:${++multiplayerShotSequence}` : null,
+      ownerId: multiplayerSessionId || 'solo',
+      weapon: selectedWeapon,
+      muzzle: center.toArray(),
+      up: normal.toArray(),
+      velocity: [0, 0, 0]
+    };
+    createEmpPulse(shot, !multiplayerPeer || multiplayerHost);
+    if (multiplayerPeer) {
+      if (multiplayerHost) broadcastToPeers({ type: 'emp-pulse', shot });
+      else sendToHost({ type: 'fire', shot });
+    }
+    weaponCooldowns.set(selectedWeapon, 1 / weaponDefinition.shotsPerSecond);
+    playOneShot(magnetAudio);
+    return;
+  }
   const isCannon = selectedWeapon === 'cannon';
   const speed = WEAPONS[selectedWeapon].shotSpeed;
   const projectileVelocity = direction
@@ -2085,8 +2179,18 @@ function fireShot() {
   }
 
   if (weaponDefinition.triggerMode === 'single') {
-    weaponCooldown = 1 / weaponDefinition.shotsPerSecond;
+    weaponCooldowns.set(selectedWeapon, 1 / weaponDefinition.shotsPerSecond);
     playOneShot(cannonAudio);
+    if (selectedWeapon === 'cannon') window.setTimeout(() => playOneShot(reloadAudio), 170);
+  }
+  if (selectedWeapon === 'minigun') {
+    minigunHeat = Math.min(1, minigunHeat + 0.055);
+    if (minigunHeat >= 1) {
+      minigunOverheated = true;
+      fireHeld = false;
+      stopMinigunAudio();
+      announceWeaponAudio(false);
+    }
   }
 }
 
@@ -2098,12 +2202,19 @@ function showMuzzleFlash(muzzle, direction, weapon) {
   muzzleFlash.position.copy(muzzle);
   muzzleFlash.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction);
   muzzleFlash.scale.set(isCannon ? 1.25 : 0.72, isCannon ? 1.8 : 1.25, isCannon ? 1.25 : 0.72);
-  muzzleFlash.material.color.setHex(isCannon ? 0xff8838 : 0xffd56a);
+  const flashColor = isCannon ? 0xff8838 : 0x55dbff;
+  muzzleFlash.material.color.setHex(flashColor);
   muzzleFlash.material.opacity = 0.95;
   muzzleFlashLight.position.copy(muzzle);
-  muzzleFlashLight.color.setHex(isCannon ? 0xff8a36 : 0xffd56a);
+  muzzleFlashLight.color.setHex(flashColor);
   muzzleFlashLight.intensity = muzzleFlashPeakIntensity;
   muzzleFlash.visible = true;
+  muzzleFlashRing.position.copy(muzzle);
+  muzzleFlashRing.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), direction);
+  muzzleFlashRing.material.color.setHex(isCannon ? 0xffc365 : 0xa5f8ff);
+  muzzleFlashRing.material.opacity = 0.9;
+  muzzleFlashRing.scale.setScalar(isCannon ? 1.9 : 1.15);
+  muzzleFlashRing.visible = true;
 }
 
 function createProjectile(shot, authoritative = false) {
@@ -2118,11 +2229,43 @@ function createProjectile(shot, authoritative = false) {
   const isCannon = weapon === 'cannon';
   showMuzzleFlash(muzzle, projectileVelocity.clone().normalize(), weapon);
   const radius = isCannon ? 0.22 : 0.045;
-  const color = isCannon ? 0xffa33a : 0xfff2c2;
-  const projectileMesh = new THREE.Mesh(
-    new THREE.SphereGeometry(radius, isCannon ? 12 : 7, isCannon ? 8 : 5),
-    new THREE.MeshBasicMaterial({ color, toneMapped: false })
+  const color = isCannon ? 0xffa33a : 0x32ceff;
+  const projectileMesh = new THREE.Group();
+  const coreMaterial = new THREE.MeshBasicMaterial({ color: isCannon ? 0xffb041 : 0xd7fcff, toneMapped: false });
+  const casingMaterial = new THREE.MeshBasicMaterial({ color: isCannon ? 0x76250c : 0x0877a8, toneMapped: false });
+  const glowMaterial = new THREE.MeshBasicMaterial({ color: isCannon ? 0xff4c14 : 0x27bfff, transparent: true, opacity: 0.72, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(isCannon ? 0.22 : 0.045, isCannon ? 0.3 : 0.075, isCannon ? 0.9 : 0.64, isCannon ? 10 : 7), casingMaterial);
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(isCannon ? 0.22 : 0.065, isCannon ? 0.48 : 0.3, isCannon ? 10 : 7), coreMaterial);
+  nose.position.y = isCannon ? 0.69 : 0.47;
+  projectileMesh.add(body, nose);
+  const core = new THREE.Mesh(new THREE.SphereGeometry(isCannon ? 0.235 : 0.08, 12, 9), coreMaterial);
+  core.scale.set(0.9, isCannon ? 1.8 : 3.7, 0.9);
+  projectileMesh.add(core);
+  const glow = new THREE.Mesh(new THREE.SphereGeometry(isCannon ? 0.28 : 0.09, 12, 9), glowMaterial);
+  glow.scale.set(1, isCannon ? 2.4 : 4.8, 1);
+  projectileMesh.add(glow);
+  if (isCannon) {
+    for (const y of [-0.3, 0.13]) {
+      const band = new THREE.Mesh(new THREE.TorusGeometry(0.285, 0.055, 6, 16), new THREE.MeshBasicMaterial({ color: 0xffd783, toneMapped: false }));
+      band.position.y = y;
+      projectileMesh.add(band);
+    }
+    for (let i = 0; i < 4; i++) {
+      const fin = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.34, 0.23), coreMaterial);
+      const angle = i * Math.PI / 2;
+      fin.position.set(Math.cos(angle) * 0.24, -0.37, Math.sin(angle) * 0.24);
+      fin.rotation.y = -angle;
+      projectileMesh.add(fin);
+    }
+  }
+  const tailLength = isCannon ? 2.7 : 1.35;
+  const tail = new THREE.Mesh(
+    new THREE.ConeGeometry(isCannon ? 0.36 : 0.11, tailLength, isCannon ? 10 : 7),
+    new THREE.MeshBasicMaterial({ color: isCannon ? 0xff571b : 0x38d7ff, transparent: true, opacity: isCannon ? 0.42 : 0.52, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, side: THREE.DoubleSide })
   );
+  tail.position.y = -tailLength / 2;
+  projectileMesh.add(tail);
+  projectileMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), projectileVelocity.clone().normalize());
   projectileMesh.position.copy(muzzle);
   scene.add(projectileMesh);
 
@@ -2155,11 +2298,122 @@ function createProjectile(shot, authoritative = false) {
   return projectiles[projectiles.length - 1];
 }
 
+function createEmpPulse(shot, authoritative = false) {
+  if (!shot || !Array.isArray(shot.muzzle) || !shot.muzzle.every(Number.isFinite)) return null;
+  if (shot.shotId && projectiles.some(effect => effect.shotId === shot.shotId)) return null;
+  const definition = WEAPONS.emp;
+  const center = new THREE.Vector3().fromArray(shot.muzzle);
+  const group = new THREE.Group();
+  group.position.copy(center);
+  const shell = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 28, 20),
+    new THREE.MeshBasicMaterial({ color: 0x26bfff, transparent: true, opacity: 0.12, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false, toneMapped: false })
+  );
+  group.add(shell);
+  const shellWire = new THREE.Mesh(
+    new THREE.SphereGeometry(0.99, 18, 12),
+    new THREE.MeshBasicMaterial({ color: 0x57dcff, wireframe: true, transparent: true, opacity: 0.62, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false })
+  );
+  group.add(shellWire);
+  const crackleMaterial = new THREE.LineBasicMaterial({ color: 0x8df5ff, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
+  const cracklePoints = [];
+  for (let i = 0; i < 80; i++) {
+    const start = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+    const tangent = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5);
+    tangent.addScaledVector(start, -tangent.dot(start)).normalize();
+    const end = start.clone().addScaledVector(tangent, (Math.random() - 0.5) * 0.42).normalize();
+    const kink = start.clone().lerp(end, 0.5)
+      .add(new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize().multiplyScalar(0.08))
+      .normalize();
+    cracklePoints.push(start, kink, kink, end);
+  }
+  const crackles = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(cracklePoints), crackleMaterial);
+  group.add(crackles);
+  scene.add(group);
+  const pulse = {
+    kind: 'empPulse', shotId: shot.shotId || null, ownerId: shot.ownerId || 'unknown',
+    authoritative, mesh: group, life: 0.9, maxLife: 0.9, radius: definition.range,
+    center, disableDuration: definition.disableDuration
+  };
+  projectiles.push(pulse);
+  if (authoritative) disablePlayersInEmpRange(pulse);
+  return pulse;
+}
+
+function disablePlayersInEmpRange(pulse) {
+  const disable = sessionId => {
+    if (!sessionId || sessionId === pulse.ownerId) return;
+    const remote = remoteTanks.get(sessionId);
+    if (sessionId !== multiplayerSessionId && (!remote?.hasPose || remote.health <= 0)) return;
+    const targetPosition = sessionId === multiplayerSessionId ? position : remote.root.position;
+    if (!targetPosition || targetPosition.distanceTo(pulse.center) > pulse.radius) return;
+    if (sessionId === multiplayerSessionId) {
+      empDisabledRemaining = Math.max(empDisabledRemaining, pulse.disableDuration);
+      forwardSpeed = 0;
+      strafeSpeed = 0;
+      flightVelocity.set(0, 0, 0);
+      fireHeld = false;
+      flightSpaceHeld = false;
+      for (const key of ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight', 'Space', 'ControlLeft']) keys[key] = false;
+      stopThrustAudio();
+      stopMinigunAudio();
+      announceWeaponAudio(false);
+      ensureEmpAura(tankRoot).visible = true;
+    } else if (remote) {
+      remote.empDisabledRemaining = Math.max(remote.empDisabledRemaining || 0, pulse.disableDuration);
+      ensureEmpAura(remote.root).visible = true;
+    }
+    if (multiplayerHost) broadcastToPeers({ type: 'emp-disable', sessionId, duration: pulse.disableDuration });
+  };
+  if (multiplayerHost) {
+    for (const sessionId of remoteTanks.keys()) disable(sessionId);
+  }
+  if (multiplayerSessionId) disable(multiplayerSessionId);
+}
+
+function ensureEmpAura(root) {
+  if (root.userData.empAura) return root.userData.empAura;
+  const aura = new THREE.Group();
+  const shell = new THREE.Mesh(
+    new THREE.IcosahedronGeometry(ballRadius * 1.65, 1),
+    new THREE.MeshBasicMaterial({ color: 0x43dfff, wireframe: true, transparent: true, opacity: 0.48, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false })
+  );
+  shell.position.y = ballRadius * 0.4;
+  aura.add(shell);
+  const band = new THREE.Mesh(
+    new THREE.TorusGeometry(ballRadius * 1.18, 0.045, 5, 40),
+    new THREE.MeshBasicMaterial({ color: 0x9ff8ff, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false })
+  );
+  band.position.y = ballRadius * 0.75;
+  band.rotation.x = Math.PI / 2;
+  aura.add(band);
+  aura.visible = false;
+  root.add(aura);
+  root.userData.empAura = aura;
+  return aura;
+}
+
+function removeEffectGroup(group) {
+  scene.remove(group);
+  group.traverse(object => {
+    if (object.geometry) object.geometry.dispose();
+    if (object.material) {
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      materials.forEach(material => material.dispose());
+    }
+  });
+}
+
 function acceptRemoteShot(sessionId, message) {
   const shot = message.shot;
   if (!shot || typeof shot.shotId !== 'string' || !shot.shotId.startsWith(`${sessionId}:`)) return;
   if (projectiles.some(projectile => projectile.shotId === shot.shotId)) return;
   shot.ownerId = sessionId;
+  if (WEAPONS[shot.weapon]?.behavior === 'emp') {
+    const pulse = createEmpPulse(shot, true);
+    if (pulse) broadcastToPeers({ type: 'emp-pulse', shot }, sessionId);
+    return;
+  }
   const projectile = createProjectile(shot, true);
   if (!projectile) return;
   broadcastToPeers({ type: 'projectile-start', shot }, sessionId);
@@ -2209,9 +2463,18 @@ function spawnImpact(point, color = 0xff8b35, size = 0.32) {
 }
 
 function removeProjectile(projectile) {
+  if (projectile.kind === 'empPulse') {
+    removeEffectGroup(projectile.mesh);
+    return;
+  }
   scene.remove(projectile.mesh);
-  projectile.mesh.geometry.dispose();
-  projectile.mesh.material.dispose();
+  projectile.mesh.traverse(object => {
+    if (object.geometry) object.geometry.dispose();
+    if (object.material) {
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      materials.forEach(material => material.dispose());
+    }
+  });
   if (projectile.trail) {
     scene.remove(projectile.trail);
     projectile.trail.geometry.dispose();
@@ -2227,6 +2490,13 @@ function updateShots(dt) {
     if (shot.kind === 'effect') {
       shot.mesh.material.opacity = Math.max(0, shot.life / shot.maxLife);
       shot.mesh.scale.multiplyScalar(1 + dt * 1.8);
+    } else if (shot.kind === 'empPulse') {
+      const progress = 1 - shot.life / shot.maxLife;
+      const radius = Math.max(0.1, progress * shot.radius);
+      shot.mesh.scale.setScalar(radius);
+      shot.mesh.children.forEach(child => {
+        if (child.material) child.material.opacity = Math.max(0, (1 - progress) * (child === shot.mesh.children[0] ? 0.42 : 0.9));
+      });
     } else {
       const previous = shot.position.clone();
       shot.position.addScaledVector(shot.velocity, dt);
@@ -2312,6 +2582,7 @@ function updateShots(dt) {
       }
 
       shot.mesh.position.copy(shot.position);
+      shot.mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), shot.velocity.clone().normalize());
       // A short streak reads as a fast tracer without leaving a long beam
       // across the whole flight path.
       const tracerLength = shot.weapon === 'cannon' ? 4.2 : 2.4;
@@ -2336,9 +2607,13 @@ function updateShots(dt) {
     const progress = muzzleFlashLife / muzzleFlashDuration;
     muzzleFlash.material.opacity = progress * progress * 0.95;
     muzzleFlash.scale.multiplyScalar(1 + dt * 8);
+    muzzleFlashRing.material.opacity = progress * 0.9;
+    muzzleFlashRing.scale.multiplyScalar(1 + dt * 13);
     muzzleFlashLight.intensity = progress * muzzleFlashPeakIntensity;
   } else {
     muzzleFlash.material.opacity = 0;
+    muzzleFlashRing.material.opacity = 0;
+    muzzleFlashRing.visible = false;
     muzzleFlashLight.intensity = 0;
   }
 }
@@ -2413,8 +2688,7 @@ function updateFreeFall(dt) {
 }
 
 function startFlight() {
-  if (!levelMeshes.length) return false;
-
+  if (empDisabledRemaining > 0) return false;
   // The reserve must recharge before thrust can be engaged again.
   if (thrustRemaining <= 0) return false;
 
@@ -2839,7 +3113,7 @@ function damp(value, amount, dt) {
 }
 
 function update(dt) {
-  if (!levelMeshes.length || !ballMesh) return;
+  if (!ballMesh) return;
 
   if (!gameStarted) {
     updateMenuCamera(dt);
@@ -2859,7 +3133,32 @@ function update(dt) {
 
   updateThrustRecharge(dt);
   if (flightState === 'flying' || flightState === 'drifting') updateFlightAim(dt);
-  weaponCooldown = Math.max(0, weaponCooldown - dt);
+  for (const [weapon, cooldown] of weaponCooldowns) {
+    const remaining = Math.max(0, cooldown - dt);
+    if (remaining === 0) weaponCooldowns.delete(weapon);
+    else weaponCooldowns.set(weapon, remaining);
+  }
+  if (!fireHeld || selectedWeapon !== 'minigun') minigunHeat = Math.max(0, minigunHeat - dt * (minigunOverheated ? 0.22 : 0.09));
+  if (minigunOverheated && minigunHeat <= 0) minigunOverheated = false;
+  const selectedCooldown = weaponCooldowns.get(selectedWeapon) || 0;
+  const selectedReload = 1 / (WEAPONS[selectedWeapon]?.shotsPerSecond || 1);
+  const reloadBar = el('reload-progress');
+  const showMinigunHeat = selectedWeapon === 'minigun' && minigunHeat > 0;
+  const showReload = selectedCooldown > 0;
+  const track = el('reload-progress-track');
+  track.hidden = !showReload && !showMinigunHeat;
+  if (showMinigunHeat) {
+    reloadBar.style.width = `${minigunHeat * 100}%`;
+    reloadBar.classList.toggle('is-overheated', minigunOverheated);
+  } else {
+    reloadBar.style.width = `${showReload ? (1 - selectedCooldown / selectedReload) * 100 : 0}%`;
+    reloadBar.classList.remove('is-overheated');
+  }
+  empDisabledRemaining = Math.max(0, empDisabledRemaining - dt);
+  if (tankRoot.userData.empAura) {
+    tankRoot.userData.empAura.visible = empDisabledRemaining > 0;
+    tankRoot.userData.empAura.rotation.y += dt * 2.4;
+  }
 
   // Existing one-second boost is only available while magnetically attached.
   if (groundBoostRemaining > 0 && flightState === 'attached') {
@@ -2882,8 +3181,9 @@ function update(dt) {
     makeSurfaceDirection(heading, aimDirection, normal);
     makeSurfaceDirection(aimDirection, heading, normal);
 
-    const drive = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
-    const strafe = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
+    const controlsDisabled = empDisabledRemaining > 0;
+    const drive = controlsDisabled ? 0 : (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
+    const strafe = controlsDisabled ? 0 : (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
 
     forwardSpeed += drive * DRIVE_ACCEL * (groundBoosting ? 1.8 : 1) * dt;
     strafeSpeed += strafe * STRAFE_ACCEL * (groundBoosting ? 1.5 : 1) * dt;
@@ -2959,7 +3259,7 @@ function update(dt) {
             ballMesh.quaternion.premultiply(rollQuaternion);
           }
         }
-      } else if (!collided) {
+      } else if (!collided && levelMeshes.length) {
         // Allow a brief support gap over seams, but fall once the tank has
         // clearly left the platform. Keep the ground movement basis stable
         // during this grace interval.
@@ -3195,6 +3495,7 @@ renderer.domElement.addEventListener('mousedown', event => {
   }
 
   if (event.button === 0 && mouseCaptured) {
+    if (empDisabledRemaining > 0) return;
     fireHeld = true;
     if (WEAPONS[selectedWeapon].triggerMode === 'single') {
       fireShot();
@@ -3290,8 +3591,16 @@ window.addEventListener('keydown', event => {
   }
   if (!gameStarted || localTankHealth <= 0 || pauseMenuOpen) return;
 
+  if (empDisabledRemaining > 0 && [
+    'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight', 'Space', 'ControlLeft'
+  ].includes(event.code)) {
+    event.preventDefault();
+    return;
+  }
+
   if (event.code === 'Digit1' && !event.repeat) setWeapon(DEFAULT_TANK.primaryWeapon);
   if (event.code === 'Digit2' && !event.repeat) setWeapon(DEFAULT_TANK.secondaryWeapon);
+  if (event.code === 'Digit3' && !event.repeat) setWeapon(DEFAULT_TANK.tertiaryWeapon);
 
   if (event.code === 'Space' && !event.repeat) {
     event.preventDefault();
