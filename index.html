@@ -6,7 +6,8 @@
 <title>Ball Tank</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;700;800&family=Archivo+Black&display=swap" rel="stylesheet">
+<link rel="preload" as="image" href="./assets/menu-images/main-tank.webp" fetchpriority="high">
 <link rel="stylesheet" href="styles.css">
 
 <script type="importmap">
@@ -24,9 +25,9 @@
 
 <section id="start-screen" aria-label="Main menu">
   <div class="landing-art" aria-hidden="true">
-    <img class="landing-image is-active" src="./assets/menu-images/main-tank.png" alt="">
-    <img class="landing-image" src="./assets/menu-images/scorp.png" alt="">
-    <img class="landing-glitch" src="./assets/menu-images/main-tank.png" alt="">
+    <img class="landing-image is-active" src="./assets/menu-images/main-tank.webp" alt="" fetchpriority="high">
+    <img class="landing-image" src="./assets/menu-images/scorp.webp" alt="" loading="lazy">
+    <img class="landing-glitch" src="./assets/menu-images/main-tank.webp" alt="">
   </div>
   <div class="landing-corners" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
   <div class="start-card" id="mode-card">
@@ -110,38 +111,48 @@
 <div id="screen-wipe" aria-hidden="true"></div>
 
 <div id="hud">
-  <strong>BALL TANK</strong><br>
-  View: <span id="view">Third person</span><br>
-  Speed: <span id="speed">0</span><br>
-  Ground boost: <span id="ground-boost">Ready</span><br>
-  Weapon: <span id="weapon">Main cannon [1]</span><br>
-  Tank integrity: <span id="tank-health">100%</span><br>
-  Targets: <span id="targets">0 / 0 destroyed</span><br>
-  Flight: <span id="flight">Magnetized</span><br>
-  Surface: <span id="surface">0, 1, 0</span>
+  <div class="hud-ruler hud-ruler-top" aria-label="Heading ruler">
+    <span class="ruler-label">HDG</span><strong id="hud-yaw-value">000°</strong>
+    <div class="ruler-track ruler-track-horizontal" id="yaw-ruler"><i class="ruler-pointer"></i></div>
+  </div>
+  <div class="hud-ruler hud-ruler-side hud-ruler-left" aria-label="Pitch ruler">
+    <span class="ruler-label">PITCH</span><strong id="hud-pitch-value">0°</strong>
+    <div class="ruler-track ruler-track-vertical" id="pitch-ruler"><i class="ruler-pointer"></i></div>
+  </div>
+  <div class="hud-ruler hud-ruler-side hud-ruler-right" aria-label="Mouse look ruler">
+    <span class="ruler-label">LOOK</span><strong id="hud-look-value">0°</strong>
+    <div class="ruler-track ruler-track-vertical" id="look-ruler"><i class="ruler-pointer"></i></div>
+  </div>
+  <section class="hud-health" aria-label="Tank health">
+    <div class="hud-topline"><span class="hud-eyebrow">TB—3000 / HULL STATUS</span><strong id="tank-health">100%</strong></div>
+    <div class="hud-health-track"><div id="hud-health-fill"></div></div>
+  </section>
+  <section class="hud-mag" aria-label="Magnet drive status"><span class="mag-icon" aria-hidden="true">✣</span><span><small>MAG DRIVE</small><strong id="mag-status">ONLINE</strong></span><i id="mag-indicator"></i></section>
+  <section class="hud-speed" aria-label="Current speed"><span class="hud-eyebrow">GROUND SPEED</span><div><strong id="hud-speed-value">0</strong><small>KM/H</small></div><span class="speed-ticks" aria-hidden="true"></span></section>
+  <section class="hud-weapons" aria-label="Weapons">
+    <div class="hud-section-head"><span>WEAPON SYSTEMS</span><span class="hud-switch-hint">[ 1 ] [ 2 ] [ 3 ]</span></div>
+    <div class="weapon-slots">
+      <div class="weapon-slot is-active" data-weapon-slot="1">
+        <span class="weapon-number">01</span><svg viewBox="0 0 48 32" aria-hidden="true"><path d="M4 13h18l5-5h15v8H27l-5 4H4zM9 20h12v5H9zM34 16h7v7h-7z"/></svg>
+        <span class="weapon-name">CANNON</span><span class="weapon-ammo">∞ <small>ROUND</small></span>
+      </div>
+      <div class="weapon-slot" data-weapon-slot="2">
+        <span class="weapon-number">02</span><svg viewBox="0 0 48 32" aria-hidden="true"><path d="M4 12h21l5-4h14v6H30l-5 4H4zM7 18h20v4H7zM34 18h7v8h-7zM11 7h17v3H11z"/></svg>
+        <span class="weapon-name">MINIGUN</span><span class="weapon-ammo">∞ <small>AMMO</small></span>
+      </div>
+      <div class="weapon-slot" data-weapon-slot="3">
+        <span class="weapon-number">03</span><svg viewBox="0 0 48 32" aria-hidden="true"><path d="M24 3 42 15 24 29 6 15zM24 9v12M16 15h16"/><circle cx="24" cy="15" r="4"/></svg>
+        <span class="weapon-name">EMP PULSE</span><span class="weapon-ammo">∞ <small>CHARGE</small></span>
+      </div>
+    </div>
+  </section>
+  <div class="hud-runtime-values" aria-hidden="true"><span id="weapon">Main cannon [1]</span><span id="view">Third person</span><span id="speed">0</span><span id="ground-boost">Ready</span><span id="targets">0 / 0 destroyed</span><span id="flight">Magnetized</span><span id="surface">0, 1, 0</span></div>
 </div>
 
 <div id="flight-boost-meter" hidden>
   <div class="boost-meter-label"><span>THRUST BOOST</span><span id="boost-time">3.0s</span></div>
   <div class="boost-meter-track"><div id="boost-bar"></div></div>
   <div id="mag-drive-hint" hidden><kbd>LEFT CTRL</kbd> Re-engage mag drive</div>
-</div>
-
-<div id="help">
-  <strong>CONTROLS</strong><br>
-  <kbd>W</kbd>/<kbd>S</kbd> Forward / Reverse<br>
-  <kbd>A</kbd>/<kbd>D</kbd> Strafe<br>
-  Mouse: Aim / Look<br>
-  Left click: Fire / hold for MG<br>
-  Right click: Hold to zoom<br>
-  <kbd>1</kbd> Main cannon / <kbd>2</kbd> Minigun / <kbd>3</kbd> EMP pulse<br>
-  <kbd>C</kbd> First / Third person<br>
-  <kbd>Shift</kbd> Ground boost (1 second)<br>
-  <kbd>Space</kbd> Detach / hold to thrust (3 seconds total)<br>
-  <kbd>Left Ctrl</kbd> Re-engage magnets<br>
-  Mouse freely aims during flight<br>
-  <kbd>Q</kbd>/<kbd>E</kbd> Roll tank in flight<br>
-  <kbd>Esc</kbd> Release mouse
 </div>
 
 <div id="crosshair"><span></span></div>
@@ -178,6 +189,6 @@
   </div>
   <button id="join-game" type="button" hidden>JOIN</button>
 </section>
-<script type="module" src="./menu.js"></script>
+<script type="module" src="./menu.js?v=20261111-1"></script>
 </body>
 </html>

@@ -8,7 +8,7 @@ export const WEAPONS = Object.freeze({
     shotsPerSecond: 1 / 1.25,
     damagePerShot: 100,
     range: 250,
-    shotSpeed: 48,
+    shotSpeed: 105,
     splashDamageRange: 4.5,
     splashDamageAmount: 45,
     behavior: 'projectile',
@@ -28,5 +28,20 @@ export const WEAPONS = Object.freeze({
     behavior: 'projectile',
     triggerMode: 'automatic',
     audio: './assets/audio/minigun.mp3'
+  }),
+  emp: Object.freeze({
+    id: 'emp',
+    name: 'EMP Pulse',
+    description: 'Expands a disruptive pulse that disables nearby tanks.',
+    shotsPerSecond: 1 / 8,
+    damagePerShot: 0,
+    range: 32,
+    shotSpeed: 0,
+    splashDamageRange: 0,
+    splashDamageAmount: 0,
+    disableDuration: 4,
+    behavior: 'emp',
+    triggerMode: 'single',
+    audio: './assets/audio/emp.mp3'
   })
 });

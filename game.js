@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+import { EXRLoader } from 'three/addons/loaders/EXRLoader.js';
+import { DecalGeometry } from 'three/addons/geometries/DecalGeometry.js';
 import Peer from 'peerjs';
 import { WEAPONS } from './data/weapons.js';
 import { TANKS, DEFAULT_TANK_ID as CATALOG_DEFAULT_TANK_ID } from './data/tanks.js';
@@ -45,6 +47,8 @@ const CAMERA_HEIGHT = 5.0;
 const CAMERA_MIN_DISTANCE = 4.5;
 const CAMERA_MAX_DISTANCE = 20;
 const CAMERA_DISTANCE_STEP = 0.9;
+const CAMERA_TANK_FADE_START = 3.2;
+const CAMERA_TANK_FADE_END = 1.1;
 const CAMERA_ZOOM_FOV = 42;
 
 const SURFACE_RESPONSE = 16;
@@ -79,6 +83,7 @@ const COLLISION_SPARK_COUNT = 16;
 
 const MAX_PLAYER_HEALTH = DEFAULT_TANK.turretHealth + DEFAULT_TANK.ballHealth;
 const TARGET_STARTING_HEALTH = 100;
+const PRACTICE_TANK_RESPAWN_DELAY = 8.8;
 
 const THRUST_DURATION = DEFAULT_TANK.thrustTime;
 const THRUST_RECHARGE_DELAY_AFTER_USE = 2;
@@ -98,11 +103,14 @@ const REATTACH_DRAG = 2.2;
 // ============================================================
 
 const scene = new THREE.Scene();
+const BLACK_LIGHT_COLOR = new THREE.Color(0, 0, 0);
 scene.background = new THREE.Color(0x101722);
 
 // Keep the weapon flash objects in the scene from startup so the first shot
 // does not introduce a new light or material shader variant.
-const muzzleFlashLight = new THREE.PointLight(0xffb347, 0, 9, 2);
+// Keep a tiny nonzero intensity so Three.js keeps this light in its shader
+// light list between shots instead of compiling a new program on first fire.
+const muzzleFlashLight = new THREE.PointLight(0xffb347, 0.001, 9, 2);
 muzzleFlashLight.castShadow = false;
 scene.add(muzzleFlashLight);
 const muzzleFlash = new THREE.Mesh(
@@ -123,6 +131,23 @@ const muzzleFlashRing = new THREE.Mesh(
 );
 muzzleFlashRing.visible = false;
 scene.add(muzzleFlashRing);
+const muzzleFlame = new THREE.Group();
+for (const [radius, length, color, opacity] of [
+  [0.48, 1.05, 0xff3a12, 0.48],
+  [0.31, 0.82, 0xff982c, 0.72],
+  [0.17, 0.58, 0xfff1bc, 0.92]
+]) {
+  const flame = new THREE.Mesh(
+    new THREE.ConeGeometry(radius, length, 10),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, userData: { baseOpacity: opacity } })
+  );
+  flame.position.y = length * 0.42;
+  muzzleFlame.add(flame);
+}
+muzzleFlame.visible = false;
+scene.add(muzzleFlame);
+let bulletHoleTexture = null;
+let primaryReticleFlashTimer = null;
 let muzzleFlashLife = 0;
 let muzzleFlashDuration = 0.1;
 let muzzleFlashPeakIntensity = 20;
@@ -136,6 +161,73 @@ renderer.toneMappingExposure = 1;
 renderer.shadowMap.enabled = true;
 document.body.appendChild(renderer.domElement);
 
+const speedLineCount = 36;
+const speedLinePositions = new Float32Array(speedLineCount * 6);
+const speedLineGeometry = new THREE.BufferGeometry();
+const speedLinePositionAttribute = new THREE.BufferAttribute(speedLinePositions, 3);
+speedLinePositionAttribute.setUsage(THREE.DynamicDrawUsage);
+speedLineGeometry.setAttribute('position', speedLinePositionAttribute);
+const speedLineMaterial = new THREE.LineBasicMaterial({
+  color: 0xbdeeff, transparent: true, opacity: 0, depthWrite: false
+});
+const speedLines = new THREE.LineSegments(speedLineGeometry, speedLineMaterial);
+speedLines.frustumCulled = false;
+speedLines.visible = false;
+scene.add(speedLines);
+const speedLineParticles = Array.from({ length: speedLineCount }, () => ({
+  along: (Math.random() - 0.5) * 18,
+  side: (Math.random() - 0.5) * 9,
+  up: (Math.random() - 0.5) * 9,
+  length: 1.4 + Math.random() * 1.8
+}));
+const speedLineAxis = new THREE.Vector3();
+const speedLineSide = new THREE.Vector3();
+const speedLineUp = new THREE.Vector3();
+const speedLineCenter = new THREE.Vector3();
+const speedLineReference = new THREE.Vector3();
+
+function updateSpeedLines(dt, inFlight, worldVelocity) {
+  const speed = worldVelocity.length();
+  speedLines.visible = inFlight && speed > 0.1;
+  if (!speedLines.visible) {
+    speedLineMaterial.opacity = 0;
+    return;
+  }
+
+  speedLineAxis.copy(worldVelocity).multiplyScalar(1 / speed);
+  speedLineReference.set(Math.abs(speedLineAxis.y) > 0.92 ? 1 : 0,
+    Math.abs(speedLineAxis.y) > 0.92 ? 0 : 1, 0);
+  speedLineSide.crossVectors(speedLineAxis, speedLineReference).normalize();
+  speedLineUp.crossVectors(speedLineAxis, speedLineSide).normalize();
+  speedLineMaterial.opacity = THREE.MathUtils.clamp(speed / 30, 0.08, 0.88);
+
+  for (let i = 0; i < speedLineCount; i++) {
+    const particle = speedLineParticles[i];
+    particle.along -= speed * dt;
+    if (particle.along < -9) {
+      particle.along += 18;
+      particle.side = (Math.random() - 0.5) * 9;
+      particle.up = (Math.random() - 0.5) * 9;
+      particle.length = 1.4 + Math.random() * 1.8;
+    }
+
+    speedLineCenter.copy(position)
+      .addScaledVector(speedLineAxis, particle.along)
+      .addScaledVector(speedLineSide, particle.side)
+      .addScaledVector(speedLineUp, particle.up);
+    const lineLength = particle.length * (0.7 + speed / 32);
+    const halfLength = lineLength * 0.5;
+    const offset = i * 6;
+    speedLinePositions[offset] = speedLineCenter.x - speedLineAxis.x * halfLength;
+    speedLinePositions[offset + 1] = speedLineCenter.y - speedLineAxis.y * halfLength;
+    speedLinePositions[offset + 2] = speedLineCenter.z - speedLineAxis.z * halfLength;
+    speedLinePositions[offset + 3] = speedLineCenter.x + speedLineAxis.x * halfLength;
+    speedLinePositions[offset + 4] = speedLineCenter.y + speedLineAxis.y * halfLength;
+    speedLinePositions[offset + 5] = speedLineCenter.z + speedLineAxis.z * halfLength;
+  }
+  speedLineGeometry.attributes.position.needsUpdate = true;
+}
+
 const camera = new THREE.PerspectiveCamera(
   65, innerWidth / innerHeight, 0.05, 1500
 );
@@ -144,7 +236,12 @@ const camera = new THREE.PerspectiveCamera(
 const pmremGenerator = new THREE.PMREMGenerator(renderer);
 pmremGenerator.compileEquirectangularShader();
 
-new RGBELoader().load(DEFAULT_LEVEL.hdriMap, texture => {
+const environmentLoader = DEFAULT_LEVEL.hdriMap.toLowerCase().endsWith('.exr')
+  ? new EXRLoader()
+  : new RGBELoader();
+
+environmentLoader.load(DEFAULT_LEVEL.hdriMap, texture => {
+  texture.mapping = THREE.EquirectangularReflectionMapping;
   const envMap = pmremGenerator.fromEquirectangular(texture).texture;
 
   scene.environment = envMap;
@@ -227,6 +324,7 @@ const flightAimTargetUp = new THREE.Vector3(0, 1, 0);
 let ballMesh = null;
 let bodyGroup = null;
 let tankModelTemplate = null;
+let localTankFadeMaterials = [];
 const remoteTanks = new Map();
 const playerHealthBars = new Map();
 let multiplayerPeer = null;
@@ -260,7 +358,15 @@ let localRespawnTimeout = null;
 
 let levelMeshes = [];
 let levelSpawnMarkers = [];
+const mapBoundaryCenter = new THREE.Vector3();
+let mapWarningRadius = 0;
+let mapDeathRadius = 0;
+let outsideWarningBoundary = false;
+let boundaryWarningTimer = null;
 let levelAnimationMixer = null;
+const cometFogTextures = new Map();
+const COMET_FOG_SCROLL_CYCLES_PER_SECOND = 1 / 24;
+let cometFogScrollTime = 0;
 let ballRadius = 1;
 
 let forwardSpeed = 0;
@@ -382,6 +488,7 @@ let engineAudioUnlocked = false;
 
 const el = id => document.getElementById(id);
 el('weapon').textContent = `${WEAPONS[DEFAULT_TANK.primaryWeapon].name} [1]`;
+document.querySelector('[data-weapon-slot="1"]').classList.add('is-active');
 
 // ============================================================
 // ASSET LOADING
@@ -409,9 +516,17 @@ function configureThrusterEffects(root) {
   thrusterVisualMaterials = [];
   root.traverse(obj => {
     if (obj.isLight) {
-      thrusterLights.push({ light: obj, intensity: obj.intensity });
+      thrusterLights.push({
+        light: obj,
+        intensity: obj.intensity,
+        color: obj.color?.clone() || null
+      });
       obj.visible = true;
-      obj.intensity = 0;
+      // Keep the light in Three.js's active light list while idle. A zero
+      // intensity light is omitted from the shader parameters, so changing it
+      // to a positive intensity on first thrust can compile a new program.
+      // Black preserves the off appearance while keeping the shader stable.
+      if (obj.color) obj.color.setRGB(0, 0, 0);
     }
 
     if (!obj.isMesh || !obj.material) return;
@@ -439,7 +554,10 @@ function setThrusterEffectsActive(active) {
   thrusterEffectsActive = active;
   for (const entry of thrusterLights) {
     entry.light.visible = true;
-    entry.light.intensity = active ? entry.intensity : 0;
+    entry.light.intensity = entry.intensity;
+    if (entry.color && entry.light.color) {
+      entry.light.color.copy(active ? entry.color : BLACK_LIGHT_COLOR);
+    }
   }
   for (const entry of thrusterVisualMaterials) {
     entry.material.colorWrite = active ? entry.colorWrite : false;
@@ -472,6 +590,43 @@ function collectMeshes(root) {
   return meshes;
 }
 
+function configureCometFogFlow(root) {
+  cometFogTextures.clear();
+  cometFogScrollTime = 0;
+
+  root.traverse(object => {
+    if (!object.isMesh) return;
+
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of materials) {
+      if (!material?.name?.toLowerCase().includes('comet tail')) continue;
+
+      // glTF carries the static fog image; scrolling its UV transform here keeps
+      // the exported asset portable while giving the comet a continuous flow.
+      for (const texture of [material.map, material.alphaMap]) {
+        if (!texture || cometFogTextures.has(texture)) continue;
+        texture.wrapT = THREE.RepeatWrapping;
+        texture.needsUpdate = true;
+        cometFogTextures.set(texture, texture.offset.y);
+      }
+    }
+  });
+
+  if (cometFogTextures.size) {
+    console.info(`Animated ${cometFogTextures.size} comet fog texture(s).`);
+  }
+}
+
+function updateCometFogFlow(dt) {
+  if (!cometFogTextures.size) return;
+
+  cometFogScrollTime = (cometFogScrollTime + dt * COMET_FOG_SCROLL_CYCLES_PER_SECOND) % 1;
+  for (const [texture, baseOffsetY] of cometFogTextures) {
+    // Decreasing the UV offset makes the texture pattern travel toward UV Y+.
+    texture.offset.y = baseOffsetY - cometFogScrollTime;
+  }
+}
+
 function collectCollisionMeshes(root) {
   const collidableMeshes = [];
   root.traverse(object => {
@@ -489,38 +644,235 @@ function registerTargets(root) {
   targets.length = 0;
 
   root.traverse(obj => {
-    if (!obj.name || !obj.name.toLowerCase().startsWith('target')) return;
-
-    const meshes = [];
-    obj.traverse(child => {
-      if (child.isMesh) meshes.push(child);
-    });
-    if (!meshes.length) return;
-
-    const record = {
-      name: obj.name,
-      root: obj,
-      meshes,
-      health: TARGET_STARTING_HEALTH,
-      maxHealth: TARGET_STARTING_HEALTH,
-      destroyed: false
-    };
-
-    meshes.forEach(mesh => {
-      mesh.userData.targetRecord = record;
-      // Clone materials so damage tinting never changes unrelated level pieces.
-      if (Array.isArray(mesh.material)) {
-        mesh.material = mesh.material.map(mat => mat ? mat.clone() : mat);
-      } else if (mesh.material) {
-        mesh.material = mesh.material.clone();
-      }
-    });
-
-    targets.push(record);
+    if (obj.name?.toLowerCase().startsWith('target')) registerTargetObject(obj);
   });
 
   updateTargetHud();
   console.info(`Registered ${targets.length} target(s). Name level objects with target prefix.`);
+}
+
+function registerTargetObject(root, { health = TARGET_STARTING_HEALTH, addToCollision = false, enemyTint = false, practiceTarget = false } = {}) {
+  const meshes = [];
+  root.traverse(child => {
+    if (child.isMesh) meshes.push(child);
+  });
+  if (!meshes.length) return null;
+
+  const record = {
+    name: root.name, root, meshes, health, maxHealth: health, destroyed: false,
+    practiceTarget,
+    surfaceNormal: normal.clone(),
+    homeQuaternion: root.quaternion.clone(),
+    knockbackVelocity: new THREE.Vector3(),
+    rockAxis: new THREE.Vector3(0, 0, 1),
+    rockAngle: 0,
+    rockVelocity: 0,
+    respawnRemaining: 0,
+    healthBar: null
+  };
+  meshes.forEach(mesh => {
+    mesh.userData.targetRecord = record;
+    // Clone materials so damage tinting never changes unrelated level pieces.
+    if (Array.isArray(mesh.material)) {
+      mesh.material = mesh.material.map(mat => mat ? mat.clone() : mat);
+    } else if (mesh.material) {
+      mesh.material = mesh.material.clone();
+    }
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    materials.forEach(material => {
+      if (!material?.color) return;
+      if (enemyTint) material.color.lerp(new THREE.Color(0xc53535), 0.28);
+    });
+    if (addToCollision && !levelMeshes.includes(mesh)) levelMeshes.push(mesh);
+  });
+  targets.push(record);
+  return record;
+}
+
+function createFreeplayEnemy() {
+  if (startupMode !== 'freeplay' || !tankModelTemplate || scene.getObjectByName('Target_PracticeTank')) return;
+  const root = new THREE.Group();
+  root.name = 'Target_PracticeTank';
+  const model = tankModelTemplate.clone(true);
+  model.traverse(object => {
+    if (!object.isMesh) return;
+    object.castShadow = true;
+    object.receiveShadow = true;
+  });
+  root.add(model);
+  root.position.copy(position).addScaledVector(heading, 24);
+  root.quaternion.copy(tankRoot.quaternion);
+  scene.add(root);
+  const record = registerTargetObject(root, {
+    health: 200,
+    addToCollision: true,
+    enemyTint: true,
+    practiceTarget: true
+  });
+  if (record) {
+    const element = document.createElement('div');
+    element.className = 'player-health-bar training-health-bar';
+    const label = document.createElement('span');
+    label.className = 'player-health-label';
+    label.textContent = 'PRACTICE TANK';
+    const track = document.createElement('div');
+    track.className = 'player-health-track';
+    const fill = document.createElement('div');
+    fill.className = 'player-health-fill';
+    track.appendChild(fill);
+    element.append(label, track);
+    el('player-health-bars').appendChild(element);
+    record.healthBar = { element, fill };
+    updateTargetHud();
+  }
+}
+
+function updatePracticeTargets(dt) {
+  camera.updateMatrixWorld(true);
+  for (const target of targets) {
+    if (!target.practiceTarget) continue;
+    if (target.destroyed) {
+      if (gameStarted && !gamePaused) {
+        target.respawnRemaining = Math.max(0, target.respawnRemaining - dt);
+        if (target.respawnRemaining === 0) respawnPracticeTank(target);
+      }
+      if (target.destroyed) {
+        if (target.healthBar) target.healthBar.element.hidden = true;
+        continue;
+      }
+    }
+    target.knockbackVelocity.multiplyScalar(Math.exp(-3 * dt));
+    target.knockbackVelocity.projectOnPlane(target.surfaceNormal);
+    target.root.position.addScaledVector(target.knockbackVelocity, dt);
+    target.rockVelocity += -target.rockAngle * 20 * dt;
+    target.rockVelocity *= Math.exp(-5.2 * dt);
+    target.rockAngle = THREE.MathUtils.clamp(target.rockAngle + target.rockVelocity * dt, -0.9, 0.9);
+    target.root.quaternion.copy(target.homeQuaternion).premultiply(
+      new THREE.Quaternion().setFromAxisAngle(target.rockAxis, target.rockAngle)
+    );
+
+    const bar = target.healthBar;
+    if (!bar) continue;
+    const worldPosition = target.root.position.clone()
+      .addScaledVector(target.surfaceNormal, ballRadius * 3.2);
+    const screenPosition = worldPosition.project(camera);
+    const onScreen = gameStarted && !target.destroyed && screenPosition.z >= -1 && screenPosition.z <= 1 &&
+      Math.abs(screenPosition.x) <= 1.12 && Math.abs(screenPosition.y) <= 1.12;
+    bar.element.hidden = !onScreen;
+    if (!onScreen) continue;
+    bar.element.style.left = `${(screenPosition.x * 0.5 + 0.5) * innerWidth}px`;
+    bar.element.style.top = `${(-screenPosition.y * 0.5 + 0.5) * innerHeight}px`;
+    const ratio = THREE.MathUtils.clamp(target.health / target.maxHealth, 0, 1);
+    bar.fill.style.width = `${ratio * 100}%`;
+    bar.fill.style.backgroundColor = ratio > 0.5 ? '#55e585' : ratio > 0.25 ? '#ffd447' : '#ff514d';
+    bar.element.title = `${Math.ceil(target.health)} / ${target.maxHealth}`;
+  }
+}
+
+function respawnPracticeTank(target) {
+  clearTankDestruction('practice-target');
+  target.health = target.maxHealth;
+  target.destroyed = false;
+  target.respawnRemaining = 0;
+  target.root.visible = true;
+  target.root.position.copy(target.homePosition);
+  target.root.quaternion.copy(target.homeQuaternion);
+  target.root.updateWorldMatrix(true, true);
+  target.knockbackVelocity.set(0, 0, 0);
+  target.rockAngle = 0;
+  target.rockVelocity = 0;
+  target.meshes.forEach(mesh => {
+    mesh.visible = true;
+    mesh.userData.targetRecord = target;
+    mesh.updateWorldMatrix(true, false);
+    if (!levelMeshes.includes(mesh)) levelMeshes.push(mesh);
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    materials.forEach(material => {
+      if (!material?.color || !material.userData.originalTargetColor) return;
+      material.color.copy(material.userData.originalTargetColor);
+      if (material.emissive) material.emissive.setHex(0x000000);
+      if ('emissiveIntensity' in material) material.emissiveIntensity = 0;
+    });
+  });
+  if (target.healthBar) target.healthBar.element.hidden = false;
+  updateTargetHud(target);
+  showMessage('PRACTICE TANK RESPAWNED');
+}
+
+function applyPracticeTankKnockback(target, shot) {
+  if (!target?.practiceTarget || shot.weapon !== 'cannon') return;
+  const direction = shot.velocity.clone().projectOnPlane(target.surfaceNormal);
+  if (direction.lengthSq() < 0.0001) return;
+  direction.normalize();
+  target.knockbackVelocity.addScaledVector(direction, 8.5);
+  const torqueAxis = new THREE.Vector3().crossVectors(target.surfaceNormal, direction);
+  if (torqueAxis.lengthSq() > 0.0001) {
+    target.rockAxis.copy(torqueAxis.normalize());
+    target.rockVelocity += 7.2;
+  }
+}
+
+function spawnTankHitEffect(point, surfaceNormal, weapon, wreckId = null) {
+  const cannon = weapon === 'cannon';
+  if (!cannon) {
+    const plume = new THREE.Group();
+    const outer = new THREE.Mesh(
+      new THREE.SphereGeometry(0.25, 10, 8),
+      new THREE.MeshBasicMaterial({ color: 0xff9d36, transparent: true, opacity: 0.82, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, userData: { baseOpacity: 0.82 } })
+    );
+    outer.scale.set(1, 0.72, 1);
+    plume.add(outer);
+    const hotCore = new THREE.Mesh(
+      new THREE.SphereGeometry(0.12, 8, 6),
+      new THREE.MeshBasicMaterial({ color: 0xfff2c2, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, userData: { baseOpacity: 0.95 } })
+    );
+    plume.add(hotCore);
+    plume.position.copy(point).addScaledVector(surfaceNormal, 0.08);
+    scene.add(plume);
+    projectiles.push({ kind: 'effect', mesh: plume, life: 0.18, maxLife: 0.18, wreckId });
+  }
+
+  const sparkCount = wreckId ? 2 : cannon ? 18 : 5;
+  for (let i = 0; i < sparkCount; i++) {
+    const sparkLife = (cannon ? 0.3 : 0.16) + Math.random() * (cannon ? 0.28 : 0.12);
+    const sparkSize = cannon ? 0.035 + Math.random() * 0.025 : 0.018 + Math.random() * 0.014;
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(sparkSize, 5, 4),
+      new THREE.MeshBasicMaterial({ color: Math.random() > 0.35 ? 0xffa13a : 0xffe6a3, transparent: true, opacity: 1, toneMapped: false, depthWrite: false })
+    );
+    mesh.position.copy(point);
+    scene.add(mesh);
+    const direction = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5)
+      .addScaledVector(surfaceNormal, 0.75).normalize();
+    collisionSparks.push({
+      mesh,
+      velocity: direction.multiplyScalar((cannon ? 8 : 3) + Math.random() * (cannon ? 7 : 2)),
+      life: sparkLife,
+      maxLife: sparkLife,
+      wreckId
+    });
+  }
+}
+
+function spawnWreckSmoke(point, up, wreckId) {
+  const life = 1.15 + Math.random() * 0.5;
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.24 + Math.random() * 0.18, 7, 6),
+    new THREE.MeshBasicMaterial({
+      color: 0x302b27,
+      transparent: true,
+      opacity: 0.48,
+      depthWrite: false,
+      toneMapped: false,
+      userData: { baseOpacity: 0.48 }
+    })
+  );
+  mesh.position.copy(point);
+  mesh.scale.setScalar(0.45);
+  scene.add(mesh);
+  const velocity = up.clone().multiplyScalar(0.8 + Math.random() * 0.7);
+  velocity.add(new THREE.Vector3((Math.random() - 0.5) * 0.45, 0, (Math.random() - 0.5) * 0.45));
+  projectiles.push({ kind: 'smoke', mesh, life, maxLife: life, velocity, wreckId });
 }
 
 function updateTargetHud(lastTarget = null) {
@@ -572,10 +924,13 @@ function damageTarget(object, amount) {
   if (target.health <= 0) {
     target.destroyed = true;
     target.meshes.forEach(mesh => {
-      mesh.visible = false;
       const index = levelMeshes.indexOf(mesh);
       if (index >= 0) levelMeshes.splice(index, 1);
     });
+    if (target.practiceTarget) createTankDestruction('practice-target', target.root);
+    else target.meshes.forEach(mesh => { mesh.visible = false; });
+    if (target.practiceTarget) target.respawnRemaining = PRACTICE_TANK_RESPAWN_DELAY;
+    if (target.healthBar) target.healthBar.element.hidden = true;
     showMessage(`${target.name} destroyed!`);
   }
 
@@ -637,6 +992,48 @@ function spawn() {
   cameraLookTarget.copy(position);
 }
 
+function configureMapBoundary(root) {
+  root.updateMatrixWorld(true);
+  const bounds = new THREE.Box3().setFromObject(root);
+  if (bounds.isEmpty()) return;
+  const mapSphere = bounds.getBoundingSphere(new THREE.Sphere());
+  mapBoundaryCenter.copy(mapSphere.center);
+  // Keep the boundary outside every map corner, with room for players to fly.
+  mapWarningRadius = Math.max(mapSphere.radius * 1.45, ballRadius * 30);
+  mapDeathRadius = Math.max(mapSphere.radius * 1.8, mapWarningRadius + ballRadius * 20);
+  outsideWarningBoundary = false;
+}
+
+function updateMapBoundary() {
+  if (mapDeathRadius <= 0 || localTankHealth <= 0) return;
+  const distance = position.distanceTo(mapBoundaryCenter);
+  if (distance >= mapDeathRadius) {
+    if (multiplayerPeer && !multiplayerHost) {
+      sendToHost({ type: 'boundary-destroyed' });
+      updateTankHealth(multiplayerSessionId, 0);
+    } else if (multiplayerHost && multiplayerSessionId) {
+      updateTankHealth(multiplayerSessionId, 0);
+      broadcastTankDestroyed(multiplayerSessionId);
+    } else {
+      // Solo sessions have no multiplayerSessionId, so updateTankHealth's
+      // session routing does not apply. Drive the local destruction directly.
+      localTankHealth = 0;
+      el('tank-health').textContent = '0%';
+      el('hud-health-fill').style.width = '0%';
+      destroyLocalPlayer();
+    }
+    showMessage('NEUTRALIZING DEFECTOR', 'boundary-death');
+    return;
+  }
+
+  if (distance >= mapWarningRadius && !outsideWarningBoundary) {
+    outsideWarningBoundary = true;
+    showMessage('RETURN TO ENGAGEMENT ZONE', 'boundary-warning');
+  } else if (distance < mapWarningRadius - ballRadius * 2) {
+    outsideWarningBoundary = false;
+  }
+}
+
 function updateMenuCamera(dt) {
   menuOrbitElapsed += dt;
   const angle = menuOrbitElapsed * 0.12;
@@ -662,7 +1059,7 @@ function startGame(mode) {
   engineAudioUnlocked = true;
   startEngineAudio();
   startGameMusic();
-  if (mode) setNetworkStatus(mode === 'freeplay' ? 'Free play' : mode === 'host' ? 'Starting host…' : 'Joining match…');
+  if (mode && mode !== 'freeplay') setNetworkStatus(mode === 'host' ? 'Starting host…' : 'Joining match…');
   showMessage('Click to capture mouse');
 }
 
@@ -729,6 +1126,7 @@ async function maybeFinishGameStartup() {
   updateLoadingStatus();
   spawn();
   updateTankTransform();
+  createFreeplayEnemy();
   scene.updateMatrixWorld(true);
 
   // Compile both thruster states and the muzzle flash light before gameplay.
@@ -741,7 +1139,7 @@ async function maybeFinishGameStartup() {
     renderer.render(scene, camera);
 
     setThrusterEffectsActive(false);
-    muzzleFlashLight.intensity = 0;
+    muzzleFlashLight.intensity = 0.001;
     if (renderer.compileAsync) await renderer.compileAsync(scene, camera);
     else renderer.compile(scene, camera);
     renderer.render(scene, camera);
@@ -749,7 +1147,7 @@ async function maybeFinishGameStartup() {
     console.warn('Graphics warm-up did not complete:', error);
   } finally {
     setThrusterEffectsActive(false);
-    muzzleFlashLight.intensity = 0;
+    muzzleFlashLight.intensity = 0.001;
   }
 
   startGame(startupMode);
@@ -779,6 +1177,7 @@ musicAudio.addEventListener('ended', () => {
 loader.load(LEVEL_URL, gltf => {
   levelRoot.add(gltf.scene);
   gltf.scene.updateMatrixWorld(true);
+  configureCometFogFlow(gltf.scene);
   if (gltf.animations.length) {
     levelAnimationMixer = new THREE.AnimationMixer(gltf.scene);
     for (const clip of gltf.animations) {
@@ -796,6 +1195,7 @@ loader.load(LEVEL_URL, gltf => {
     }
   });
   console.info(`Found ${levelSpawnMarkers.length} start marker(s).`);
+  configureMapBoundary(levelRoot);
   registerTargets(gltf.scene);
   el('surface').textContent = 'Level loaded';
   levelReady = true;
@@ -815,6 +1215,7 @@ loader.load(LEVEL_URL, gltf => {
   );
 
   levelRoot.add(cube);
+  configureMapBoundary(levelRoot);
   levelMeshes = [cube];
   levelSpawnMarkers = [];
   registerTargets(cube);
@@ -826,16 +1227,30 @@ loader.load(LEVEL_URL, gltf => {
 loader.load(TANK_URL, gltf => {
 
   const model = gltf.scene;
-  tankModelTemplate = model;
   model.scale.setScalar(MODEL_SCALE);
+  configureImportedLights(model);
+  tankModelTemplate = model.clone(true);
   tankRoot.add(model);
   tankRoot.visible = !firstPerson;
-  configureImportedLights(model);
 
   model.traverse(obj => {
     if (obj.isMesh) {
+        // Keep the local player's fade independent from remote tank materials.
+        obj.material = Array.isArray(obj.material)
+          ? obj.material.map(material => material?.clone() || material)
+          : obj.material?.clone() || obj.material;
         obj.castShadow = true;
         obj.receiveShadow = true;
+        const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const material of materials) {
+          if (!material) continue;
+          localTankFadeMaterials.push({
+            material,
+            opacity: material.opacity,
+            transparent: material.transparent,
+            depthWrite: material.depthWrite
+          });
+        }
     }
     if (obj.name === 'Ball') ballMesh = obj;
     if (obj.name === 'Body') bodyGroup = obj;
@@ -1095,8 +1510,15 @@ function ensureRemoteTank(sessionId) {
       magnets: null,
       magnetsActive: true,
       targetPosition: new THREE.Vector3(),
+      visualPosition: new THREE.Vector3(),
       targetRotation: new THREE.Quaternion(),
+      visualRotation: new THREE.Quaternion(),
       targetBodyRotation: null,
+      hitVelocity: new THREE.Vector3(),
+      hitOffset: new THREE.Vector3(),
+      hitRockAxis: new THREE.Vector3(0, 0, 1),
+      hitRockAngle: 0,
+      hitRockVelocity: 0,
       lastSequence: -1,
       latestPose: null,
       health: MAX_PLAYER_HEALTH,
@@ -1128,6 +1550,8 @@ function applyRemotePose(sessionId, pose, sequence = 0) {
   if (!remote.hasPose) {
     remote.root.position.copy(remote.targetPosition);
     remote.root.quaternion.copy(remote.targetRotation);
+    remote.visualPosition.copy(remote.targetPosition);
+    remote.visualRotation.copy(remote.targetRotation);
     remote.hasPose = true;
   }
   if (playerHealth.get(sessionId) === 0 && !tankDestructions.has(sessionId)) {
@@ -1147,6 +1571,8 @@ function showRemoteTankDestruction(message) {
     remote.root.quaternion.fromArray(pose.rotation).normalize();
     remote.targetPosition.copy(remote.root.position);
     remote.targetRotation.copy(remote.root.quaternion);
+    remote.visualPosition.copy(remote.root.position);
+    remote.visualRotation.copy(remote.root.quaternion);
     remote.hasPose = true;
   }
   remote.health = 0;
@@ -1163,14 +1589,39 @@ function updateRemoteTanks(dt) {
     }
     if (!remote.hasPose || remote.health <= 0) continue;
     const blend = 1 - Math.exp(-14 * dt);
-    remote.root.position.lerp(remote.targetPosition, blend);
-    remote.root.quaternion.slerp(remote.targetRotation, blend);
+    remote.hitOffset.addScaledVector(remote.hitVelocity, dt);
+    remote.hitVelocity.multiplyScalar(Math.exp(-3.2 * dt));
+    remote.hitOffset.multiplyScalar(Math.exp(-0.18 * dt));
+    remote.hitRockVelocity += -remote.hitRockAngle * 20 * dt;
+    remote.hitRockVelocity *= Math.exp(-5.2 * dt);
+    remote.hitRockAngle = THREE.MathUtils.clamp(remote.hitRockAngle + remote.hitRockVelocity * dt, -0.8, 0.8);
+    remote.visualPosition.lerp(remote.targetPosition, blend);
+    remote.root.position.copy(remote.visualPosition).add(remote.hitOffset);
+    remote.visualRotation.slerp(remote.targetRotation, blend);
+    remote.root.quaternion.copy(remote.visualRotation).premultiply(
+      new THREE.Quaternion().setFromAxisAngle(remote.hitRockAxis, remote.hitRockAngle)
+    );
     if (remote.body && remote.targetBodyRotation) {
       remote.body.rotation.order = 'YXZ';
       remote.body.rotation.x += (remote.targetBodyRotation[0] - remote.body.rotation.x) * blend;
       remote.body.rotation.y += (remote.targetBodyRotation[1] - remote.body.rotation.y) * blend;
       remote.body.rotation.z += (remote.targetBodyRotation[2] - remote.body.rotation.z) * blend;
     }
+  }
+}
+
+function applyRemoteTankImpact(sessionId, hitDirection) {
+  const remote = remoteTanks.get(sessionId);
+  if (!remote || !Array.isArray(hitDirection) || !hitDirection.every(Number.isFinite)) return;
+  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(remote.root.quaternion).normalize();
+  const direction = new THREE.Vector3().fromArray(hitDirection).projectOnPlane(up);
+  if (direction.lengthSq() < 0.0001) return;
+  direction.normalize();
+  remote.hitVelocity.addScaledVector(direction, 8.5);
+  const axis = new THREE.Vector3().crossVectors(up, direction);
+  if (axis.lengthSq() > 0.0001) {
+    remote.hitRockAxis.copy(axis.normalize());
+    remote.hitRockVelocity += 6.2;
   }
 }
 
@@ -1410,6 +1861,7 @@ function updateTankHealth(sessionId, health) {
   if (sessionId === multiplayerSessionId) {
     localTankHealth = safeHealth;
     el('tank-health').textContent = `${Math.ceil(safeHealth / MAX_PLAYER_HEALTH * 100)}%`;
+    el('hud-health-fill').style.width = `${safeHealth / MAX_PLAYER_HEALTH * 100}%`;
     if (safeHealth <= 0 && previous > 0) destroyLocalPlayer();
   } else {
     const remote = remoteTanks.get(sessionId);
@@ -1421,8 +1873,135 @@ function updateTankHealth(sessionId, health) {
   }
 }
 
-function createTankDestruction(sessionId, root) {
-  if (tankDestructions.has(sessionId)) return;
+function clearAttachedBulletHoles(root) {
+  const attachedDecals = [];
+  root.traverse(object => {
+    if (object.userData?.bulletHole) attachedDecals.push(object);
+  });
+  for (const mesh of attachedDecals) {
+    mesh.parent?.remove(mesh);
+    mesh.geometry?.dispose();
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    materials.forEach(material => material?.dispose());
+    const index = projectiles.findIndex(effect => effect.kind === 'decal' && effect.mesh === mesh);
+    if (index >= 0) projectiles.splice(index, 1);
+  }
+}
+
+function charTankHull(root) {
+  const originalMaterials = [];
+  const lights = [];
+  root.traverse(object => {
+    if (object.isLight) {
+      lights.push({ object, visible: object.visible });
+      object.visible = false;
+    }
+    if (!object.isMesh) return;
+    originalMaterials.push({ object, material: object.material });
+    const charred = material => {
+      if (!material) return material;
+      const replacement = material.clone();
+      if (replacement.color) replacement.color.setHex(0x1a1713);
+      if ('roughness' in replacement) replacement.roughness = 0.98;
+      if ('metalness' in replacement) replacement.metalness = 0.06;
+      if (replacement.emissive) replacement.emissive.setHex(0x000000);
+      if ('emissiveIntensity' in replacement) replacement.emissiveIntensity = 0;
+      replacement.needsUpdate = true;
+      return replacement;
+    };
+    object.material = Array.isArray(object.material)
+      ? object.material.map(charred)
+      : charred(object.material);
+  });
+  return { originalMaterials, lights };
+}
+
+function emitWreckFire(destruction) {
+  const { root, sessionId } = destruction;
+  if (!root.visible) return;
+  root.updateWorldMatrix(true, true);
+  const bounds = new THREE.Box3().setFromObject(root);
+  if (bounds.isEmpty()) return;
+  const center = bounds.getCenter(new THREE.Vector3());
+  const size = bounds.getSize(new THREE.Vector3());
+  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(root.getWorldQuaternion(new THREE.Quaternion())).normalize();
+  const spread = Math.max(0.35, size.length() * 0.16);
+  const tangent = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5)
+    .projectOnPlane(up).normalize().multiplyScalar((Math.random() - 0.5) * spread * 1.5);
+  const point = center.addScaledVector(up, spread * 0.35).add(tangent);
+  spawnTankHitEffect(point, up, 'minigun', sessionId);
+  if (Math.random() > 0.35) spawnWreckSmoke(point, up, sessionId);
+}
+
+function clearWreckTransientEffects(sessionId) {
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    if (projectiles[i].wreckId !== sessionId) continue;
+    removeProjectile(projectiles[i]);
+    projectiles.splice(i, 1);
+  }
+  for (let i = collisionSparks.length - 1; i >= 0; i--) {
+    if (collisionSparks[i].wreckId !== sessionId) continue;
+    const spark = collisionSparks[i];
+    scene.remove(spark.mesh);
+    spark.mesh.geometry.dispose();
+    spark.mesh.material.dispose();
+    collisionSparks.splice(i, 1);
+  }
+}
+
+function spawnBrightTankExplosion(root, wreckId) {
+  root.updateWorldMatrix(true, true);
+  const bounds = new THREE.Box3().setFromObject(root);
+  const center = bounds.isEmpty() ? root.getWorldPosition(new THREE.Vector3()) : bounds.getCenter(new THREE.Vector3());
+  const size = bounds.isEmpty() ? 1.5 : Math.max(1.5, bounds.getSize(new THREE.Vector3()).length() * 0.26);
+  const burst = new THREE.Group();
+  const layers = [
+    { scale: 1.55, color: 0xff451b, opacity: 0.78 },
+    { scale: 1.08, color: 0xffa333, opacity: 0.9 },
+    { scale: 0.58, color: 0xfff4ca, opacity: 1 }
+  ];
+  for (const layer of layers) {
+    const material = new THREE.MeshBasicMaterial({
+      color: layer.color,
+      transparent: true,
+      opacity: layer.opacity,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      toneMapped: false,
+      side: THREE.DoubleSide,
+      userData: { baseOpacity: layer.opacity }
+    });
+    const sphere = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 9), material);
+    sphere.scale.setScalar(size * layer.scale);
+    burst.add(sphere);
+  }
+  burst.position.copy(center);
+  scene.add(burst);
+  projectiles.push({ kind: 'effect', mesh: burst, life: 0.62, maxLife: 0.62, wreckId, explosion: true });
+
+  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(root.getWorldQuaternion(new THREE.Quaternion())).normalize();
+  const shockwave = new THREE.Mesh(
+    new THREE.TorusGeometry(1, 0.045, 7, 48),
+    new THREE.MeshBasicMaterial({
+      color: 0xffefc8,
+      transparent: true,
+      opacity: 0.94,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      toneMapped: false
+    })
+  );
+  shockwave.position.copy(center);
+  shockwave.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), up);
+  shockwave.scale.setScalar(size * 0.25);
+  scene.add(shockwave);
+  projectiles.push({ kind: 'shockwave', mesh: shockwave, life: 0.34, maxLife: 0.34, size, wreckId });
+}
+
+function explodeTankWreck(destruction) {
+  if (destruction.phase !== 'burning') return;
+  const { root, sessionId } = destruction;
+  clearWreckTransientEffects(sessionId);
   root.updateWorldMatrix(true, true);
   const fragments = [];
   root.traverse(object => {
@@ -1431,12 +2010,13 @@ function createTankDestruction(sessionId, root) {
     const worldRotation = new THREE.Quaternion();
     const worldScale = new THREE.Vector3();
     object.matrixWorld.decompose(worldPosition, worldRotation, worldScale);
-    const materials = (Array.isArray(object.material) ? object.material : [object.material]).map(material => {
+    const materials = (Array.isArray(object.material) ? object.material : [object.material]).filter(Boolean).map(material => {
       const fragmentMaterial = material.clone();
       fragmentMaterial.transparent = true;
       fragmentMaterial.depthWrite = false;
       return { material: fragmentMaterial, opacity: material.opacity };
     });
+    if (!materials.length) return;
     const fragment = new THREE.Mesh(
       object.geometry,
       materials.length > 1 ? materials.map(item => item.material) : materials[0].material
@@ -1459,9 +2039,30 @@ function createTankDestruction(sessionId, root) {
     fragments.push(item);
     tankFragments.push(item);
   });
-  if (!fragments.length) return;
   root.visible = false;
-  tankDestructions.set(sessionId, { root, fragments });
+  destruction.phase = 'fragments';
+  destruction.fragments = fragments;
+}
+
+function createTankDestruction(sessionId, root) {
+  if (tankDestructions.has(sessionId)) return;
+  clearAttachedBulletHoles(root);
+  root.updateWorldMatrix(true, true);
+  const originalRootVisible = root.visible;
+  const hullState = charTankHull(root);
+  root.visible = true;
+  const destruction = {
+    sessionId,
+    root,
+    phase: 'burning',
+    burnElapsed: 0,
+    nextFire: 0,
+    burnDuration: 5,
+    originalRootVisible,
+    ...hullState
+  };
+  tankDestructions.set(sessionId, destruction);
+  spawnBrightTankExplosion(root, sessionId);
   playOneShot(explosionAudio);
 }
 
@@ -1475,11 +2076,29 @@ function clearTankDestruction(sessionId) {
     for (const item of fragment.materials) item.material.dispose();
     tankFragments.splice(i, 1);
   }
-  destruction.root.visible = true;
+  clearWreckTransientEffects(sessionId);
+  for (const { object, material } of destruction.originalMaterials) {
+    const charredMaterials = Array.isArray(object.material) ? object.material : [object.material];
+    charredMaterials.forEach(item => item?.dispose());
+    object.material = material;
+  }
+  for (const light of destruction.lights) light.object.visible = light.visible;
+  destruction.root.visible = destruction.originalRootVisible;
   tankDestructions.delete(sessionId);
 }
 
 function updateDestructionEffects(dt) {
+  for (const destruction of tankDestructions.values()) {
+    if (destruction.phase !== 'burning') continue;
+    destruction.burnElapsed += dt;
+    destruction.nextFire -= dt;
+    if (destruction.nextFire <= 0) {
+      emitWreckFire(destruction);
+      destruction.nextFire = 0.42 + Math.random() * 0.18;
+    }
+    if (destruction.burnElapsed >= destruction.burnDuration) explodeTankWreck(destruction);
+  }
+
   for (let i = tankFragments.length - 1; i >= 0; i--) {
     const fragment = tankFragments[i];
     fragment.age += dt;
@@ -1507,12 +2126,14 @@ function destroyLocalPlayer() {
   announceWeaponAudio(false);
   stopMinigunAudio();
   stopThrustAudio();
-  showMessage('TANK DESTROYED');
+  const outOfBounds = mapDeathRadius > 0 && position.distanceTo(mapBoundaryCenter) >= mapDeathRadius;
+  showMessage(outOfBounds ? 'NEUTRALIZING DEFECTOR' : 'TANK DESTROYED',
+    outOfBounds ? 'boundary-death' : 'default');
   if (localRespawnTimeout !== null) clearTimeout(localRespawnTimeout);
   localRespawnTimeout = setTimeout(() => {
     localRespawnTimeout = null;
     respawnLocalPlayer();
-  }, 5000);
+  }, 8800);
 }
 
 function respawnLocalPlayer() {
@@ -1546,6 +2167,7 @@ function respawnLocalPlayer() {
   localTankHealth = MAX_PLAYER_HEALTH;
   playerHealth.set(sessionId, MAX_PLAYER_HEALTH);
   el('tank-health').textContent = '100%';
+  el('hud-health-fill').style.width = '100%';
   if (multiplayerPeer) {
     if (multiplayerHost) broadcastToPeers({ type: 'tank-health', sessionId, health: MAX_PLAYER_HEALTH });
     else if (hostConnection?.open) hostConnection.send({ type: 'respawn' });
@@ -1584,6 +2206,15 @@ function handleRemoteContact(message) {
 
 function handlePeerMessage(connection, message) {
   if (!message || typeof message !== 'object') return;
+
+  if (message.type === 'boundary-destroyed' && multiplayerHost) {
+    const remote = remoteTanks.get(connection.peer);
+    if (!remote || remote.health <= 0) return;
+    updateTankHealth(connection.peer, 0);
+    broadcastToPeers({ type: 'tank-health', sessionId: connection.peer, health: 0 });
+    broadcastTankDestroyed(connection.peer);
+    return;
+  }
 
   if (message.type === 'fire' && multiplayerHost) {
     acceptRemoteShot(connection.peer, message);
@@ -1889,14 +2520,42 @@ function resolveCameraCollision(cameraAnchor, desiredCamera) {
   const distance = direction.length();
   if (distance < 0.001 || !levelMeshes.length) return desiredCamera.clone();
 
-  raycaster.set(cameraAnchor, direction.normalize());
+  direction.normalize();
+  raycaster.set(cameraAnchor, direction);
   raycaster.far = distance;
 
   const hits = raycaster.intersectObjects(levelMeshes, true);
   if (!hits.length) return desiredCamera.clone();
 
-  const safeDistance = Math.max(0, hits[0].distance - 0.35);
-  return cameraAnchor.clone().addScaledVector(direction.normalize(), safeDistance);
+  // Keep the near clipping plane clear of the wall, with a little extra room
+  // for the camera body. This is applied to the interpolated position too, so
+  // follow lag can never leave the camera on the opposite side of geometry.
+  const safeDistance = Math.max(0, hits[0].distance - 0.6);
+  return cameraAnchor.clone().addScaledVector(direction, safeDistance);
+}
+
+function updateLocalTankCameraFade() {
+  if (!localTankFadeMaterials.length) return;
+
+  const distance = camera.position.distanceTo(position);
+  const t = THREE.MathUtils.clamp(
+    (distance - CAMERA_TANK_FADE_END) / (CAMERA_TANK_FADE_START - CAMERA_TANK_FADE_END),
+    0,
+    1
+  );
+  const opacityScale = t * t * (3 - 2 * t);
+
+  for (const entry of localTankFadeMaterials) {
+    const material = entry.material;
+    const opacity = entry.opacity * opacityScale;
+    const transparent = opacityScale < 0.999 || entry.transparent;
+    if (material.opacity !== opacity || material.transparent !== transparent) {
+      material.opacity = opacity;
+      material.transparent = transparent;
+      material.depthWrite = opacityScale < 0.999 ? false : entry.depthWrite;
+      material.needsUpdate = true;
+    }
+  }
 }
 
 // ============================================================
@@ -1910,6 +2569,9 @@ function setWeapon(weapon) {
   const slot = weapon === DEFAULT_TANK.primaryWeapon ? 1
     : weapon === DEFAULT_TANK.secondaryWeapon ? 2 : 3;
   el('weapon').textContent = `${definition.name} [${slot}]`;
+  document.querySelectorAll('[data-weapon-slot]').forEach(node => {
+    node.classList.toggle('is-active', Number(node.dataset.weaponSlot) === slot);
+  });
   minigunAccumulator = 0;
   stopMinigunAudio();
   showMessage(`${definition.name} selected`);
@@ -1926,6 +2588,9 @@ function playOneShot(audio) {
 function setMagnetsActive(active, playSound = true) {
   if (magnetsActive === active) return;
   magnetsActive = active;
+  el('mag-status').textContent = active ? 'ONLINE' : 'OFFLINE';
+  el('mag-indicator').classList.toggle('is-offline', !active);
+  el('mag-status').closest('.hud-mag').classList.toggle('is-offline', !active);
   if (magnetsElement) magnetsElement.visible = active;
   if (playSound) playOneShot(magnetAudio);
 }
@@ -2215,6 +2880,10 @@ function showMuzzleFlash(muzzle, direction, weapon) {
   muzzleFlashRing.material.opacity = 0.9;
   muzzleFlashRing.scale.setScalar(isCannon ? 1.9 : 1.15);
   muzzleFlashRing.visible = true;
+  muzzleFlame.position.copy(muzzle).addScaledVector(direction, 0.18);
+  muzzleFlame.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction);
+  muzzleFlame.scale.setScalar(isCannon ? 1 : 0.01);
+  muzzleFlame.visible = isCannon;
 }
 
 function createProjectile(shot, authoritative = false) {
@@ -2228,43 +2897,46 @@ function createProjectile(shot, authoritative = false) {
   if (projectileVelocity.lengthSq() < 1) return null;
   const isCannon = weapon === 'cannon';
   showMuzzleFlash(muzzle, projectileVelocity.clone().normalize(), weapon);
-  const radius = isCannon ? 0.22 : 0.045;
-  const color = isCannon ? 0xffa33a : 0x32ceff;
+  const radius = isCannon ? 0.17 : 0.045;
+  const color = isCannon ? 0xfff4d6 : 0x32ceff;
   const projectileMesh = new THREE.Group();
-  const coreMaterial = new THREE.MeshBasicMaterial({ color: isCannon ? 0xffb041 : 0xd7fcff, toneMapped: false });
-  const casingMaterial = new THREE.MeshBasicMaterial({ color: isCannon ? 0x76250c : 0x0877a8, toneMapped: false });
-  const glowMaterial = new THREE.MeshBasicMaterial({ color: isCannon ? 0xff4c14 : 0x27bfff, transparent: true, opacity: 0.72, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(isCannon ? 0.22 : 0.045, isCannon ? 0.3 : 0.075, isCannon ? 0.9 : 0.64, isCannon ? 10 : 7), casingMaterial);
-  const nose = new THREE.Mesh(new THREE.ConeGeometry(isCannon ? 0.22 : 0.065, isCannon ? 0.48 : 0.3, isCannon ? 10 : 7), coreMaterial);
-  nose.position.y = isCannon ? 0.69 : 0.47;
-  projectileMesh.add(body, nose);
-  const core = new THREE.Mesh(new THREE.SphereGeometry(isCannon ? 0.235 : 0.08, 12, 9), coreMaterial);
-  core.scale.set(0.9, isCannon ? 1.8 : 3.7, 0.9);
-  projectileMesh.add(core);
-  const glow = new THREE.Mesh(new THREE.SphereGeometry(isCannon ? 0.28 : 0.09, 12, 9), glowMaterial);
-  glow.scale.set(1, isCannon ? 2.4 : 4.8, 1);
-  projectileMesh.add(glow);
+  const coreMaterial = new THREE.MeshBasicMaterial({ color: isCannon ? 0xffffff : 0xd7fcff, toneMapped: false });
+  const casingMaterial = new THREE.MeshBasicMaterial({ color: 0x0877a8, toneMapped: false });
+  const glowMaterial = new THREE.MeshBasicMaterial({ color: isCannon ? 0xffb64d : 0x27bfff, transparent: true, opacity: 0.72, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
   if (isCannon) {
-    for (const y of [-0.3, 0.13]) {
-      const band = new THREE.Mesh(new THREE.TorusGeometry(0.285, 0.055, 6, 16), new THREE.MeshBasicMaterial({ color: 0xffd783, toneMapped: false }));
-      band.position.y = y;
-      projectileMesh.add(band);
-    }
-    for (let i = 0; i < 4; i++) {
-      const fin = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.34, 0.23), coreMaterial);
-      const angle = i * Math.PI / 2;
-      fin.position.set(Math.cos(angle) * 0.24, -0.37, Math.sin(angle) * 0.24);
-      fin.rotation.y = -angle;
-      projectileMesh.add(fin);
-    }
+    const envelope = new THREE.Mesh(new THREE.SphereGeometry(0.23, 12, 9), glowMaterial);
+    envelope.scale.set(0.85, 2.0, 0.85);
+    projectileMesh.add(envelope);
+    const core = new THREE.Mesh(new THREE.SphereGeometry(0.13, 12, 9), coreMaterial);
+    core.scale.set(0.9, 2.35, 0.9);
+    projectileMesh.add(core);
+  } else {
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.075, 0.64, 7), casingMaterial);
+    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.065, 0.3, 7), coreMaterial);
+    nose.position.y = 0.47;
+    projectileMesh.add(body, nose);
+    const core = new THREE.Mesh(new THREE.SphereGeometry(0.08, 12, 9), coreMaterial);
+    core.scale.set(0.9, 3.7, 0.9);
+    projectileMesh.add(core);
+    const glow = new THREE.Mesh(new THREE.SphereGeometry(0.09, 12, 9), glowMaterial);
+    glow.scale.set(1, 4.8, 1);
+    projectileMesh.add(glow);
   }
-  const tailLength = isCannon ? 2.7 : 1.35;
+  const tailLength = isCannon ? 4.2 : 1.35;
   const tail = new THREE.Mesh(
-    new THREE.ConeGeometry(isCannon ? 0.36 : 0.11, tailLength, isCannon ? 10 : 7),
-    new THREE.MeshBasicMaterial({ color: isCannon ? 0xff571b : 0x38d7ff, transparent: true, opacity: isCannon ? 0.42 : 0.52, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, side: THREE.DoubleSide })
+    new THREE.ConeGeometry(isCannon ? 0.31 : 0.11, tailLength, isCannon ? 12 : 7),
+    new THREE.MeshBasicMaterial({ color: isCannon ? 0xff9c38 : 0x38d7ff, transparent: true, opacity: isCannon ? 0.58 : 0.52, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, side: THREE.DoubleSide })
   );
   tail.position.y = -tailLength / 2;
   projectileMesh.add(tail);
+  if (isCannon) {
+    const hotStreak = new THREE.Mesh(
+      new THREE.ConeGeometry(0.12, 3.5, 10),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.78, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, side: THREE.DoubleSide })
+    );
+    hotStreak.position.y = -1.72;
+    projectileMesh.add(hotStreak);
+  }
   projectileMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), projectileVelocity.clone().normalize());
   projectileMesh.position.copy(muzzle);
   scene.add(projectileMesh);
@@ -2421,6 +3093,13 @@ function acceptRemoteShot(sessionId, message) {
 
 function finishRemoteProjectile(message) {
   const shotIndex = projectiles.findIndex(projectile => projectile.kind === 'projectile' && projectile.shotId === message.shotId);
+  const shot = shotIndex >= 0 ? projectiles[shotIndex] : null;
+  if (message.weapon === 'cannon' && message.targetId !== multiplayerSessionId) {
+    applyRemoteTankImpact(message.targetId, message.hitDirection);
+  }
+  if (shot?.ownerId === multiplayerSessionId && message.targetId && message.weapon === 'cannon') {
+    flashPrimaryReticle();
+  }
   if (shotIndex >= 0) {
     removeProjectile(projectiles[shotIndex]);
     projectiles.splice(shotIndex, 1);
@@ -2433,9 +3112,13 @@ function finishRemoteProjectile(message) {
       showMessage('TANK HIT');
     }
   }
-  if (Array.isArray(message.point) && message.point.every(Number.isFinite)) {
-    const isCannon = message.weapon === 'cannon';
-    spawnImpact(new THREE.Vector3().fromArray(message.point), isCannon ? 0xff7628 : 0xffd27a, isCannon ? 0.55 : 0.2);
+  if (!message.targetId && Array.isArray(message.point) && message.point.every(Number.isFinite) &&
+      Array.isArray(message.normal) && message.normal.every(Number.isFinite)) {
+    spawnBulletHole(
+      new THREE.Vector3().fromArray(message.point),
+      new THREE.Vector3().fromArray(message.normal),
+      message.weapon === 'cannon' ? 0.54 : 0.19
+    );
   }
 }
 
@@ -2452,14 +3135,101 @@ function relayRemoteContact(sessionId, message) {
   broadcastToPeers({ ...event, type: 'player-contact' }, sessionId);
 }
 
-function spawnImpact(point, color = 0xff8b35, size = 0.32) {
-  const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(size, 10, 7),
-    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9 })
+function flashPrimaryReticle() {
+  const reticle = el('crosshair');
+  reticle.classList.remove('is-hit');
+  // Restart the flash cleanly when hits land in quick succession.
+  void reticle.offsetWidth;
+  reticle.classList.add('is-hit');
+  if (primaryReticleFlashTimer) clearTimeout(primaryReticleFlashTimer);
+  primaryReticleFlashTimer = setTimeout(() => {
+    reticle.classList.remove('is-hit');
+    primaryReticleFlashTimer = null;
+  }, 170);
+}
+
+function getBulletHoleTexture() {
+  if (bulletHoleTexture) return bulletHoleTexture;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 128;
+  const context = canvas.getContext('2d');
+  const crater = context.createRadialGradient(64, 64, 5, 64, 64, 58);
+  crater.addColorStop(0, 'rgba(8, 9, 10, 0.98)');
+  crater.addColorStop(0.22, 'rgba(18, 18, 17, 0.96)');
+  crater.addColorStop(0.34, 'rgba(42, 40, 36, 0.83)');
+  crater.addColorStop(0.46, 'rgba(22, 22, 21, 0.42)');
+  crater.addColorStop(0.7, 'rgba(10, 10, 10, 0.12)');
+  crater.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  context.fillStyle = crater;
+  context.fillRect(0, 0, 128, 128);
+  context.strokeStyle = 'rgba(110, 105, 95, 0.48)';
+  context.lineWidth = 3;
+  context.beginPath();
+  context.arc(64, 64, 35, 0, Math.PI * 2);
+  context.stroke();
+  for (let i = 0; i < 18; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const distance = 25 + Math.random() * 27;
+    context.fillStyle = `rgba(14, 14, 13, ${0.25 + Math.random() * 0.5})`;
+    context.beginPath();
+    context.arc(64 + Math.cos(angle) * distance, 64 + Math.sin(angle) * distance, 1 + Math.random() * 2, 0, Math.PI * 2);
+    context.fill();
+  }
+  bulletHoleTexture = new THREE.CanvasTexture(canvas);
+  bulletHoleTexture.colorSpace = THREE.SRGBColorSpace;
+  return bulletHoleTexture;
+}
+
+function spawnBulletHole(point, normal, size = 0.24, surface = null, attachRoot = null) {
+  if (!normal || normal.lengthSq() < 0.0001) return null;
+  const oldestDecalIndex = projectiles.findIndex(effect => effect.kind === 'decal');
+  const activeDecals = projectiles.reduce((count, effect) => count + (effect.kind === 'decal' ? 1 : 0), 0);
+  if (activeDecals >= 120 && oldestDecalIndex >= 0) {
+    removeProjectile(projectiles[oldestDecalIndex]);
+    projectiles.splice(oldestDecalIndex, 1);
+  }
+  const surfaceNormal = normal.clone().normalize();
+  const projectorPosition = point.clone().addScaledVector(surfaceNormal, 0.025);
+  const orientation = new THREE.Euler().setFromQuaternion(
+    new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), surfaceNormal)
   );
-  mesh.position.copy(point);
-  scene.add(mesh);
-  projectiles.push({ kind: 'effect', mesh, life: 0.28, maxLife: 0.28 });
+  const decalSize = new THREE.Vector3(size, size, Math.max(0.06, size * 0.22));
+  let geometry;
+  if (surface?.isMesh) {
+    surface.updateWorldMatrix(true, false);
+    geometry = new DecalGeometry(surface, projectorPosition, orientation, decalSize);
+  } else {
+    // Remote clients receive the hit location and normal, so a tiny plane keeps
+    // the same decal visible even when the specific level mesh is unavailable.
+    geometry = new THREE.PlaneGeometry(size, size);
+    const rotation = new THREE.Quaternion().setFromEuler(orientation);
+    geometry.applyQuaternion(rotation);
+    geometry.translate(projectorPosition.x, projectorPosition.y, projectorPosition.z);
+  }
+  if (attachRoot) {
+    attachRoot.updateWorldMatrix(true, false);
+    geometry.applyMatrix4(attachRoot.matrixWorld.clone().invert());
+  }
+  if (!geometry.attributes.position?.count) {
+    geometry.dispose();
+    return null;
+  }
+  const material = new THREE.MeshBasicMaterial({
+    map: getBulletHoleTexture(),
+    transparent: true,
+    opacity: 0.92,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -4,
+    side: THREE.DoubleSide,
+    toneMapped: false
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.userData.bulletHole = true;
+  mesh.renderOrder = 2;
+  (attachRoot || scene).add(mesh);
+  projectiles.push({ kind: 'decal', mesh, life: 12, maxLife: 12, fadeDuration: 4 });
+  return mesh;
 }
 
 function removeProjectile(projectile) {
@@ -2467,7 +3237,7 @@ function removeProjectile(projectile) {
     removeEffectGroup(projectile.mesh);
     return;
   }
-  scene.remove(projectile.mesh);
+  projectile.mesh.parent?.remove(projectile.mesh);
   projectile.mesh.traverse(object => {
     if (object.geometry) object.geometry.dispose();
     if (object.material) {
@@ -2488,8 +3258,23 @@ function updateShots(dt) {
     shot.life -= dt;
 
     if (shot.kind === 'effect') {
-      shot.mesh.material.opacity = Math.max(0, shot.life / shot.maxLife);
-      shot.mesh.scale.multiplyScalar(1 + dt * 1.8);
+      const progress = Math.max(0, shot.life / shot.maxLife);
+      shot.mesh.scale.setScalar(0.3 + (1 - progress) * 1.15);
+      shot.mesh.traverse(object => {
+        if (object.material) object.material.opacity = object.material.userData.baseOpacity * progress;
+        if (object.isLight) object.intensity = object.userData.baseIntensity * progress;
+      });
+    } else if (shot.kind === 'shockwave') {
+      const progress = Math.max(0, shot.life / shot.maxLife);
+      shot.mesh.scale.setScalar(shot.size * (0.25 + (1 - progress) * 2.35));
+      shot.mesh.material.opacity = progress * 0.94;
+    } else if (shot.kind === 'smoke') {
+      const progress = Math.max(0, shot.life / shot.maxLife);
+      shot.mesh.position.addScaledVector(shot.velocity, dt);
+      shot.mesh.scale.setScalar(0.45 + (1 - progress) * 2.6);
+      shot.mesh.material.opacity = shot.mesh.material.userData.baseOpacity * progress;
+    } else if (shot.kind === 'decal') {
+      shot.mesh.material.opacity = Math.min(0.92, shot.life / shot.fadeDuration * 0.92);
     } else if (shot.kind === 'empPulse') {
       const progress = 1 - shot.life / shot.maxLife;
       const radius = Math.max(0.1, progress * shot.radius);
@@ -2523,21 +3308,34 @@ function updateShots(dt) {
           }
         }
         const hits = raycaster.intersectObjects(levelMeshes, true);
-        const worldHit = hits.length ? hits[0] : null;
+        let worldHit = hits.length ? hits[0] : null;
+        const practiceMeshes = targets
+          .filter(target => target.practiceTarget && !target.destroyed && target.root.visible)
+          .flatMap(target => target.meshes.filter(mesh => mesh.visible));
+        const practiceHit = practiceMeshes.length
+          ? raycaster.intersectObjects(practiceMeshes, false)[0]
+          : null;
+        if (practiceHit && (!worldHit || practiceHit.distance < worldHit.distance)) worldHit = practiceHit;
 
         if (tankHit && (!worldHit || tankHit.distance < worldHit.distance)) {
           const health = Math.max(0, (playerHealth.get(tankHit.targetId) ?? MAX_PLAYER_HEALTH) - shot.damage);
           updateTankHealth(tankHit.targetId, health);
           if (multiplayerHost) broadcastToPeers({ type: 'tank-health', sessionId: tankHit.targetId, health });
           if (health <= 0) broadcastTankDestroyed(tankHit.targetId);
-          spawnImpact(tankHit.point, 0xff4a35, shot.weapon === 'cannon' ? 0.65 : 0.24);
+          if (shot.weapon === 'cannon' && tankHit.targetId !== multiplayerSessionId) {
+            applyRemoteTankImpact(tankHit.targetId, shot.velocity.toArray());
+          }
+          if (shot.ownerId === multiplayerSessionId && tankHit.targetId !== multiplayerSessionId && shot.weapon === 'cannon') {
+            flashPrimaryReticle();
+          }
           if (shot.networked && multiplayerHost) {
             const targetPose = tankHit.targetId === multiplayerSessionId
               ? localTankPose()
               : multiplayerPoses.get(tankHit.targetId)?.pose || null;
             broadcastToPeers({
               type: 'projectile-end', shotId: shot.shotId, weapon: shot.weapon,
-              targetId: tankHit.targetId, health, targetPose, point: tankHit.point.toArray()
+              targetId: tankHit.targetId, health, targetPose, point: tankHit.point.toArray(),
+              hitDirection: shot.weapon === 'cannon' ? shot.velocity.toArray() : null
             });
           }
           removeProjectile(shot);
@@ -2547,13 +3345,24 @@ function updateShots(dt) {
 
         if (worldHit) {
           const hit = worldHit;
-          const isCannon = shot.weapon === 'cannon';
-          if (shot.ownerId === multiplayerSessionId || !multiplayerHost) damageTarget(hit.object, shot.damage);
-          spawnImpact(
+          const target = findTargetRecord(hit.object);
+          const hitNormal = getWorldHitNormal(hit);
+          const isPracticeTank = target?.practiceTarget;
+          if (isPracticeTank) {
+            applyPracticeTankKnockback(target, shot);
+            spawnTankHitEffect(hit.point, hitNormal, shot.weapon, 'practice-target');
+            if (shot.weapon === 'cannon' && (!multiplayerPeer || shot.ownerId === multiplayerSessionId)) {
+              flashPrimaryReticle();
+            }
+          }
+          spawnBulletHole(
             hit.point,
-            isCannon ? 0xff7628 : 0xffd27a,
-            isCannon ? 0.55 : 0.2
+            hitNormal,
+            shot.weapon === 'cannon' ? 0.78 : 0.3,
+            hit.object,
+            isPracticeTank ? target.root : null
           );
+          if (shot.ownerId === multiplayerSessionId || !multiplayerHost) damageTarget(hit.object, shot.damage);
 
           const weaponDefinition = WEAPONS[shot.weapon];
           if (weaponDefinition.splashDamageRange > 0 &&
@@ -2573,7 +3382,10 @@ function updateShots(dt) {
             });
           }
 
-          if (shot.networked && multiplayerHost) broadcastToPeers({ type: 'projectile-end', shotId: shot.shotId, weapon: shot.weapon, point: hit.point.toArray() });
+          if (shot.networked && multiplayerHost) broadcastToPeers({
+            type: 'projectile-end', shotId: shot.shotId, weapon: shot.weapon,
+            point: hit.point.toArray(), normal: hitNormal.toArray()
+          });
 
           removeProjectile(shot);
           projectiles.splice(i, 1);
@@ -2610,11 +3422,15 @@ function updateShots(dt) {
     muzzleFlashRing.material.opacity = progress * 0.9;
     muzzleFlashRing.scale.multiplyScalar(1 + dt * 13);
     muzzleFlashLight.intensity = progress * muzzleFlashPeakIntensity;
+    muzzleFlame.scale.setScalar(0.65 + (1 - progress) * 0.9);
+    for (const flame of muzzleFlame.children) flame.material.opacity = flame.material.userData.baseOpacity * progress;
   } else {
     muzzleFlash.material.opacity = 0;
     muzzleFlashRing.material.opacity = 0;
     muzzleFlashRing.visible = false;
-    muzzleFlashLight.intensity = 0;
+    muzzleFlame.visible = false;
+    for (const flame of muzzleFlame.children) flame.material.opacity = flame.material.userData.baseOpacity;
+    muzzleFlashLight.intensity = 0.001;
   }
 }
 
@@ -3328,6 +4144,7 @@ function update(dt) {
 }
 
   updateTankTransform();
+  updateMapBoundary();
   resolveTankContacts();
 
   // CAMERA: the camera tracks the current aiming vector in every movement mode.
@@ -3339,7 +4156,8 @@ function update(dt) {
   if (firstPerson) {
     if (!airborneLook) camera.up.lerp(normal, 1 - Math.exp(-16 * dt));
     const fpPosition = position.clone().addScaledVector(normal, ballRadius * 1.65);
-    camera.position.lerp(fpPosition, 1 - Math.exp(-16 * dt));
+    const fpCameraTarget = camera.position.clone().lerp(fpPosition, 1 - Math.exp(-16 * dt));
+    camera.position.copy(resolveCameraCollision(position, fpCameraTarget));
     const fpLookTarget = camera.position.clone().addScaledVector(viewDirection, 20);
     cameraLookTarget.lerp(fpLookTarget, 1 - Math.exp(-16 * dt));
     camera.lookAt(cameraLookTarget);
@@ -3352,8 +4170,12 @@ function update(dt) {
       .addScaledVector(viewDirection, -thirdPersonDistance);
     const desiredLookTarget = position.clone().addScaledVector(viewDirection, 20);
     const cameraFollow = 1 - Math.exp(-FLIGHT_CAMERA_RESPONSE * dt);
-    const cameraTarget = resolveCameraCollision(cameraAnchor, desiredCamera);
-    camera.position.lerp(cameraTarget, cameraFollow);
+    // The elevated camera anchor can sweep through the room during a 180°
+    // reattachment turn. Cast from the tank itself so the anchor never starts
+    // beyond the wall and accidentally places the camera outside the level.
+    const cameraTarget = resolveCameraCollision(position, desiredCamera);
+    const followedPosition = camera.position.clone().lerp(cameraTarget, cameraFollow);
+    camera.position.copy(resolveCameraCollision(position, followedPosition));
     cameraLookTarget.lerp(desiredLookTarget, cameraFollow);
     camera.lookAt(cameraLookTarget);
   } else {
@@ -3378,11 +4200,14 @@ function update(dt) {
     const desiredCamera = cameraAnchor.clone()
       .addScaledVector(viewDirection, -thirdPersonDistance);
     const desiredLookTarget = position.clone().addScaledVector(viewDirection, 20);
-    const cameraTarget = resolveCameraCollision(cameraAnchor, desiredCamera);
-    camera.position.lerp(cameraTarget, cameraFollow);
+    const cameraTarget = resolveCameraCollision(position, desiredCamera);
+    const followedPosition = camera.position.clone().lerp(cameraTarget, cameraFollow);
+    camera.position.copy(resolveCameraCollision(position, followedPosition));
     cameraLookTarget.lerp(desiredLookTarget, cameraFollow);
     camera.lookAt(cameraLookTarget);
   }
+
+  updateLocalTankCameraFade();
 
   if (thrusterMesh) {
     // Keep the group (and light nodes) present so first thrust cannot add
@@ -3427,9 +4252,11 @@ function update(dt) {
     thrustRemaining <= 0 && thrustRechargeDelayRemaining > 0
   );
 
-  el('speed').textContent = flightState === 'attached'
+  const speedReadout = flightState === 'attached'
     ? Math.hypot(forwardSpeed, strafeSpeed).toFixed(1)
     : ((flightState === 'flying' || flightState === 'drifting') ? flightVelocity.length() : reattachVelocity.length()).toFixed(1);
+  el('speed').textContent = speedReadout;
+  el('hud-speed-value').textContent = Math.round(Number(speedReadout));
   el('ground-boost').textContent = groundBoosting ? groundBoostRemaining.toFixed(1) + 's' : 'Ready';
   el('flight').textContent = flightState === 'attached'
     ? 'Magnetized'
@@ -3440,6 +4267,30 @@ function update(dt) {
         : 'Magnets engaging';
   el('surface').textContent =
     `${normal.x.toFixed(1)}, ${normal.y.toFixed(1)}, ${normal.z.toFixed(1)}`;
+  const yawDegrees = (THREE.MathUtils.radToDeg(Math.atan2(heading.x, -heading.z)) + 360) % 360;
+  const pitchDegrees = THREE.MathUtils.radToDeg(aimPitch);
+  el('yaw-ruler').style.backgroundPositionX = `${-yawDegrees}px`;
+  el('yaw-ruler').style.setProperty('--scale-offset', `${-yawDegrees}px`);
+  el('pitch-ruler').style.backgroundPositionY = `${pitchDegrees * 0.65}px`;
+  el('pitch-ruler').style.setProperty('--scale-offset', `${pitchDegrees * 0.65}px`);
+  el('look-ruler').style.backgroundPositionY = `${-pitchDegrees * 0.65}px`;
+  el('look-ruler').style.setProperty('--scale-offset', `${-pitchDegrees * 0.65}px`);
+  el('hud-yaw-value').textContent = `${String(Math.round(yawDegrees) % 360).padStart(3, '0')}°`;
+  el('hud-pitch-value').textContent = `${Math.round(pitchDegrees)}°`;
+  el('hud-look-value').textContent = `${Math.round(pitchDegrees)}°`;
+
+  let travelVelocity;
+  if (flightState === 'flying' || flightState === 'drifting') {
+    travelVelocity = flightVelocity;
+  } else if (flightState === 'attached') {
+    const right = new THREE.Vector3().crossVectors(heading, normal).normalize();
+    travelVelocity = heading.clone().multiplyScalar(forwardSpeed)
+      .addScaledVector(right, strafeSpeed);
+  } else {
+    travelVelocity = reattachVelocity;
+  }
+  const airborneSpeedLines = flightState === 'flying' || flightState === 'drifting';
+  updateSpeedLines(dt, airborneSpeedLines, travelVelocity);
 }
 
 // ============================================================
@@ -3458,8 +4309,20 @@ function setViewMode(fp) {
   showMessage(el('view').textContent);
 }
 
-function showMessage(_text) {
-  // Toast messages are temporarily disabled; persistent HUD hints remain.
+function showMessage(_text, style = 'default') {
+  // Keep the shared message node for the two boundary alerts only. Gameplay
+  // hints (boost, weapon changes, respawns, and similar events) use HUD state
+  // where available and should not create transient toast popups.
+  if (style !== 'boundary-warning' && style !== 'boundary-death') return;
+  const message = el('message');
+  message.textContent = _text;
+  message.dataset.style = style;
+  message.style.display = 'block';
+  if (boundaryWarningTimer !== null) clearTimeout(boundaryWarningTimer);
+  boundaryWarningTimer = setTimeout(() => {
+    message.style.display = 'none';
+    boundaryWarningTimer = null;
+  }, 3200);
 }
 
 renderer.domElement.addEventListener('click', () => {
@@ -3701,9 +4564,11 @@ function animate() {
 
   update(dt);
   if (levelAnimationMixer && !gamePaused) levelAnimationMixer.update(dt);
+  if (!gamePaused) updateCometFogFlow(dt);
 
   updateRemoteTanks(dt);
   updatePlayerHealthBars();
+  updatePracticeTargets(dt);
   updateBodyCrosshair();
   if (multiplayerPeer && multiplayerSessionId) {
     multiplayerSendAccumulator += dt;

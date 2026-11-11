@@ -3,9 +3,11 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 export function createTankPreview(container, onLoaded = () => {}) {
   const scene = new THREE.Scene();
-  scene.fog = new THREE.Fog(0x0a121e, 10, 28);
+  const previewBackground = 0x242424;
+  scene.background = new THREE.Color(previewBackground);
+  scene.fog = new THREE.Fog(previewBackground, 15, 36);
   const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 100);
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -34,7 +36,7 @@ export function createTankPreview(container, onLoaded = () => {}) {
 
   const floor = new THREE.Mesh(
     new THREE.PlaneGeometry(200, 200),
-    new THREE.MeshStandardMaterial({ color: 0x4b5b6d, roughness: 0.9, metalness: 0.02 })
+    new THREE.MeshStandardMaterial({ color: previewBackground, roughness: 0.9, metalness: 0.02 })
   );
   floor.rotation.x = -Math.PI / 2;
   floor.position.y = -1.18;

@@ -22,10 +22,14 @@ jobs:
       - uses: actions/configure-pages@v5
       - name: Prepare static game files
         run: |
+          test -f assets/menu-images/main-tank.png
+          test -f assets/menu-images/scorp.png
+          test -f assets/menu-images/logo.svg
+          test -f assets/menu-images/logo-small.svg
           mkdir -p dist/assets
           cp index.html menu.js game.js tank-preview.js styles.css dist/
           cp -R data dist/data
-          cp -R assets/audio assets/levels assets/tanks dist/assets/
+          cp -R assets/audio assets/levels assets/tanks assets/menu-images dist/assets/
           find dist/assets -type f \( -name '*.blend' -o -name '*.blend1' -o -name '*.hdr' \) -delete
           touch dist/.nojekyll
       - uses: actions/upload-pages-artifact@v3
