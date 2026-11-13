@@ -60,6 +60,18 @@
   </div>
 </section>
 
+<button id="menu-settings" type="button" aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.2a3.8 3.8 0 1 0 0 7.6 3.8 3.8 0 0 0 0-7.6Zm9 4.9v-2.2l-2.1-.7a7.4 7.4 0 0 0-.7-1.7l1-2-1.6-1.6-2 1a7.4 7.4 0 0 0-1.7-.7L13.2 3h-2.3l-.7 2.1a7.4 7.4 0 0 0-1.7.7l-2-1-1.6 1.6 1 2a7.4 7.4 0 0 0-.7 1.7l-2.1.7v2.2l2.1.7a7.4 7.4 0 0 0 .7 1.7l-1 2 1.6 1.6 2-1a7.4 7.4 0 0 0 1.7.7l.7 2.1h2.3l.7-2.1a7.4 7.4 0 0 0 1.7-.7l2 1 1.6-1.6-1-2a7.4 7.4 0 0 0 .7-1.7l2.1-.7Z"/></svg></button>
+<section id="callsign-modal" role="dialog" aria-modal="true" aria-labelledby="callsign-title" hidden>
+  <form id="callsign-form" class="callsign-card">
+    <div class="start-kicker">PLAYER SETTINGS</div>
+    <h2 id="callsign-title">CHOOSE YOUR CALLSIGN</h2>
+    <p id="callsign-description">Your name will appear in multiplayer matches.</p>
+    <label for="callsign-input">CALLSIGN</label>
+    <input id="callsign-input" type="text" maxlength="18" placeholder="Enter your name" autocomplete="nickname" required>
+    <div class="callsign-actions"><button id="callsign-cancel" type="button" hidden>CANCEL</button><button type="submit">SAVE CALLSIGN</button></div>
+  </form>
+</section>
+
 <section id="level-screen" aria-label="Choose a level" hidden>
   <div class="level-backdrop" aria-hidden="true">
     <img id="level-art" alt="">
@@ -132,6 +144,11 @@
       <div class="hud-room-code-row"><output id="host-room-code"></output><button id="copy-room-code" type="button">COPY</button></div>
     </section>
   </section>
+  <section id="match-hud" aria-label="Match score and events" hidden>
+    <div class="match-score"><span class="score-team score-red"><b>RED</b><strong id="red-score">0</strong></span><span class="score-limit">FIRST TO 10</span><span class="score-team score-blue"><strong id="blue-score">0</strong><b>BLUE</b></span></div>
+    <ol id="match-events" aria-live="polite" aria-label="Match events"></ol>
+  </section>
+  <div id="player-callsign" aria-label="Your callsign" hidden></div>
   <section class="hud-mag" aria-label="Magnet drive status"><span class="mag-icon" aria-hidden="true">✣</span><span><small>MAG DRIVE</small><strong id="mag-status">ONLINE</strong></span><i id="mag-indicator"></i></section>
   <section class="hud-speed" aria-label="Current speed"><span class="hud-eyebrow">GROUND SPEED</span><div><strong id="hud-speed-value">0</strong><small>KM/H</small></div><span class="speed-ticks" aria-hidden="true"></span></section>
   <section class="hud-weapons" aria-label="Weapons">

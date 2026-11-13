@@ -41,8 +41,8 @@ canvas { display: block; }
   overflow: hidden;
   background: #121820d9;
   border: 1px solid #ffffffd0;
-  border-radius: 5px;
-  box-shadow: 0 1px 4px #000b;
+  border-radius: 0;
+  box-shadow: none;
 }
 .player-health-fill {
   width: 100%;
@@ -305,6 +305,38 @@ body.first-person #crosshair {
   font-size: 12px;
 }
 #network-status.visible { display: block; }
+#network-status { top: auto; right: 12px; bottom: 12px; left: auto; transform: none; font-size: 11px; }
+.player-name-entry { display:flex; align-items:center; justify-content:center; gap:10px; margin:0 auto 16px; color:#bceaff; font:700 10px Archivo,Arial,sans-serif; letter-spacing:.16em; }
+.player-name-entry input { width:180px; padding:8px 10px; color:#fff; background:#08141dcc; border:1px solid #74c9e85c; font:600 13px Archivo,Arial,sans-serif; letter-spacing:.04em; }
+#menu-settings { position:fixed; z-index:14; top:18px; right:18px; display:grid; place-items:center; width:42px; height:42px; padding:9px; color:#fff; background:transparent; border:0; cursor:pointer; }
+#menu-settings svg { width:22px; height:22px; fill:currentColor; }
+#menu-settings:hover { color:#d8d8d8; background:transparent; }
+#menu-settings[hidden] { display:none !important; }
+body.game-started #menu-settings { display:none; }
+#callsign-modal { position:fixed; inset:0; z-index:30; display:grid; place-items:center; padding:20px; background:#0009; }
+#callsign-modal[hidden] { display:none; }
+.callsign-card { width:min(420px,100%); padding:32px; color:#151515; background:#fff; border:2px solid #111; box-shadow:8px 8px 0 #111; }
+.callsign-card .start-kicker { color:#555; }
+.callsign-card h2 { margin:12px 0 8px; font:32px/1 var(--menu-title); }
+.callsign-card p { margin:0 0 22px; color:#555; font:14px/1.45 Archivo,Arial,sans-serif; }
+.callsign-card label { display:block; margin-bottom:7px; font:700 10px Archivo,Arial,sans-serif; letter-spacing:.15em; }
+.callsign-card input { width:100%; padding:12px; color:#111; background:#fff; border:1px solid #111; border-radius:0; font:600 16px Archivo,Arial,sans-serif; }
+.callsign-actions { display:flex; justify-content:flex-end; gap:9px; margin-top:18px; }
+.callsign-actions button { padding:11px 14px; color:#fff; background:#111; border:1px solid #111; border-radius:0; font:700 10px Archivo,Arial,sans-serif; letter-spacing:.12em; cursor:pointer; }
+.callsign-actions button:hover { color:#111; background:#e8e8e8; }
+.callsign-actions button[hidden] { display:none; }
+#match-hud { position:fixed; z-index:6; top:18px; right:18px; width:min(320px,38vw); color:#eaf7ff; font:700 11px Archivo,Arial,sans-serif; pointer-events:none; }
+#match-hud[hidden], #player-callsign[hidden] { display:none; }
+.match-score { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:#07131cdb; border:1px solid #9ddfff72; box-shadow:0 0 18px #00b7ff16; }
+.score-team { display:flex; align-items:center; gap:8px; font-size:10px; letter-spacing:.14em; }
+.score-team strong { font:24px/1 var(--menu-title); }
+.score-red { color:#ff7772; }.score-blue { color:#69d7ff; }
+.score-limit { color:#b9d4e1; font-size:8px; letter-spacing:.15em; }
+#match-events { display:flex; flex-direction:column; gap:4px; padding:8px 0 0; margin:0; list-style:none; }
+#match-events li { padding:6px 9px; color:#e2f4fa; background:#07131cbf; border-left:2px solid #65dfff; text-align:right; font-size:10px; }
+#player-callsign { position:fixed; z-index:6; top:23px; left:24px; padding:8px 11px; color:#fff; background:#07131cbf; border:1px solid #9ddfff56; font:700 10px Archivo,Arial,sans-serif; letter-spacing:.12em; }
+#player-health-bars [data-team="red"] { border-color:#ff6666; } #player-health-bars [data-team="blue"] { border-color:#62d8ff; }
+@media(max-width:700px) { #match-hud { top:auto; right:8px; bottom:12px; width:min(270px,52vw); } #player-callsign { top:8px; left:8px; } }
 kbd {
   border: 1px solid #ffffff55;
   border-radius: 3px;

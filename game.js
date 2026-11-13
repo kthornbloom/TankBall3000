@@ -332,6 +332,11 @@ const playerHealthBars = new Map();
 let multiplayerPeer = null;
 let multiplayerSessionId = null;
 let multiplayerHost = false;
+let localPlayerName = GAME_SELECTION.playerName || 'Player';
+const playerNames = new Map();
+const playerTeams = new Map();
+const teamScores = { red: 0, blue: 0 };
+let matchOver = false;
 let hostConnection = null;
 const peerConnections = new Map();
 const multiplayerPoses = new Map();
@@ -1705,7 +1710,7 @@ function getPlayerHealthBar(sessionId) {
   element.className = 'player-health-bar';
   const label = document.createElement('span');
   label.className = 'player-health-label';
-  label.textContent = sessionId === '__local__' ? 'YOU' : sessionId.slice(-5).toUpperCase();
+  label.textContent = sessionId === '__local__' ? localPlayerName : playerLabel(sessionId);
   const track = document.createElement('div');
   track.className = 'player-health-track';
   const fill = document.createElement('div');
@@ -1729,6 +1734,9 @@ function updatePlayerHealthBars() {
   const placeBar = (sessionId, root, up, health, isLocal = false) => {
     if (health <= 0 || !root.visible || (isLocal && firstPerson)) return;
     const bar = getPlayerHealthBar(sessionId);
+    bar.element.querySelector('.player-health-label').textContent = sessionId === '__local__' ? localPlayerName : playerLabel(sessionId);
+    bar.element.dataset.team = playerTeams.get(sessionId) || '';
+    bar.element.setAttribute('aria-label', `${playerLabel(sessionId)} (${playerTeams.get(sessionId) || 'unassigned'})`);
     activeBars.add(sessionId);
     const worldPosition = root.position.clone().addScaledVector(up, ballRadius * 3.1);
     const screenPosition = worldPosition.project(camera);
@@ -1876,12 +1884,62 @@ function setNetworkStatus(message) {
   status.classList.add('visible');
 }
 
+function playerLabel(id) { return playerNames.get(id) || (id === multiplayerSessionId ? localPlayerName : 'Player'); }
+function renderMatchScore() {
+  el('red-score').textContent = teamScores.red;
+  el('blue-score').textContent = teamScores.blue;
+}
+function addMatchEvent(text) {
+  const list = el('match-events');
+  if (!list) return;
+  const item = document.createElement('li');
+  item.textContent = text;
+  list.prepend(item);
+  while (list.children.length > 6) list.lastElementChild.remove();
+}
+function assignTeam(id) {
+  if (!playerTeams.has(id)) {
+    const reds = [...playerTeams.values()].filter(team => team === 'red').length;
+    const blues = [...playerTeams.values()].filter(team => team === 'blue').length;
+    playerTeams.set(id, reds <= blues ? 'red' : 'blue');
+  }
+  return playerTeams.get(id);
+}
+function applyMatchState(state) {
+  if (!state) return;
+  if (state.names) for (const [id, name] of Object.entries(state.names)) playerNames.set(id, name);
+  if (state.teams) for (const [id, team] of Object.entries(state.teams)) playerTeams.set(id, team);
+  if (state.scores) { teamScores.red = state.scores.red || 0; teamScores.blue = state.scores.blue || 0; }
+  renderMatchScore();
+  if (multiplayerSessionId && playerTeams.has(multiplayerSessionId)) {
+    el('player-callsign').textContent = `${playerLabel(multiplayerSessionId)} · ${playerTeams.get(multiplayerSessionId).toUpperCase()} TEAM`;
+    el('player-callsign').hidden = false;
+    el('match-hud').hidden = false;
+  }
+}
+function matchState() { return { names: Object.fromEntries(playerNames), teams: Object.fromEntries(playerTeams), scores: { ...teamScores } }; }
+function handlePlayerKill(killerId, victimId) {
+  if (!multiplayerHost || matchOver || !victimId || killerId === victimId) return;
+  const killerTeam = playerTeams.get(killerId);
+  if (!killerTeam) return;
+  teamScores[killerTeam]++;
+  const event = { type: 'match-event', text: `${playerLabel(killerId)} destroyed ${playerLabel(victimId)}`, state: matchState() };
+  addMatchEvent(event.text);
+  renderMatchScore();
+  broadcastToPeers(event);
+  if (teamScores[killerTeam] >= 10) {
+    matchOver = true;
+    const won = { type: 'match-event', text: `${killerTeam.toUpperCase()} TEAM WINS!`, state: matchState(), won: true };
+    addMatchEvent(won.text);
+    broadcastToPeers(won);
+  }
+}
+
 function updatePeerCount() {
   const count = multiplayerHost ? peerConnections.size + 1 : null;
   if (count !== null) {
-    setNetworkStatus(`Hosting · ${count}/4 players`);
     for (const connection of peerConnections.values()) {
-      if (connection.open) connection.send({ type: 'room-count', count });
+      if (connection.open) connection.send({ type: 'room-count', count, state: matchState() });
     }
   }
 }
@@ -2391,6 +2449,13 @@ function handlePeerMessage(connection, message) {
     showRemoteTankDestruction(message);
     return;
   }
+  if (message.type === 'match-event') {
+    applyMatchState(message.state);
+    addMatchEvent(message.text);
+    if (message.won) matchOver = true;
+    return;
+  }
+  if (message.type === 'match-state') { applyMatchState(message.state); return; }
 
   if (message.type === 'projectile-end') {
     finishRemoteProjectile(message);
@@ -2413,7 +2478,7 @@ function handlePeerMessage(connection, message) {
   }
 
   if (message.type === 'room-count') {
-    setNetworkStatus(`Connected · ${message.count}/4 players`);
+    applyMatchState(message.state);
   } else if (message.type === 'player-left' && typeof message.sessionId === 'string') {
     removeRemoteTank(message.sessionId);
   } else if (message.type === 'room-full') {
@@ -2426,10 +2491,16 @@ function handlePeerMessage(connection, message) {
     updateTankHealth(connection.peer, MAX_PLAYER_HEALTH);
     broadcastToPeers({ type: 'tank-health', sessionId: connection.peer, health: MAX_PLAYER_HEALTH });
   } else if (message.type === 'hello' && multiplayerHost) {
+    playerNames.set(connection.peer, (typeof message.name === 'string' && message.name.trim().slice(0, 18)) || 'Player');
+    const team = assignTeam(connection.peer);
     const tankId = Object.hasOwn(TANKS, message.tankId) ? message.tankId : DEFAULT_TANK_ID;
     setRemoteTankType(connection.peer, tankId);
     broadcastToPeers({ type: 'tank-selected', sessionId: connection.peer, tankId }, connection.peer);
     connection.send({ type: 'room-config', levelId: DEFAULT_LEVEL_ID });
+    addMatchEvent(`${playerLabel(connection.peer)} joined ${team.toUpperCase()} team`);
+    connection.send({ type: 'match-event', text: `${playerLabel(connection.peer)} joined ${team.toUpperCase()} team`, state: matchState() });
+    broadcastToPeers({ type: 'match-event', text: `${playerLabel(connection.peer)} joined ${team.toUpperCase()} team`, state: matchState() }, connection.peer);
+    connection.send({ type: 'match-state', state: matchState() });
     for (const [sessionId, health] of playerHealth) {
       connection.send({ type: 'tank-health', sessionId, health });
     }
@@ -2466,6 +2537,11 @@ function attachPeerConnection(connection, incoming = false) {
     connection.tankBallOpenHandled = true;
     peerConnections.set(connection.peer, connection);
     if (multiplayerHost) {
+      playerNames.set(multiplayerSessionId, localPlayerName);
+      playerNames.set(connection.peer, playerNames.get(connection.peer) || 'Player');
+      assignTeam(multiplayerSessionId);
+      assignTeam(connection.peer);
+      connection.send({ type: 'match-state', state: matchState() });
       connection.send({ type: 'room-config', levelId: DEFAULT_LEVEL_ID });
       playerHealth.set(connection.peer, MAX_PLAYER_HEALTH);
       connection.send({ type: 'tank-health', sessionId: connection.peer, health: MAX_PLAYER_HEALTH });
@@ -2487,8 +2563,8 @@ function attachPeerConnection(connection, incoming = false) {
       updatePeerCount();
     } else {
       hostConnection = connection;
-      connection.send({ type: 'hello', tankId: GAME_SELECTION.tankId || DEFAULT_TANK_ID });
-      setNetworkStatus('Connected to host · syncing tanks…');
+      playerNames.set(multiplayerSessionId, localPlayerName);
+      connection.send({ type: 'hello', tankId: GAME_SELECTION.tankId || DEFAULT_TANK_ID, name: localPlayerName });
     }
   };
   connection.on('open', onOpen);
@@ -2505,7 +2581,7 @@ function attachPeerConnection(connection, incoming = false) {
     } else {
       hostConnection = null;
       for (const sessionId of [...remoteTanks.keys()]) removeRemoteTank(sessionId);
-      setNetworkStatus('Host disconnected');
+      addMatchEvent('Host disconnected');
     }
   });
   connection.on('error', error => {
@@ -2540,12 +2616,18 @@ async function hostMultiplayerGame() {
     multiplayerHost = true;
     peer.on('open', id => {
       multiplayerSessionId = id;
+      localPlayerName = GAME_SELECTION.playerName || 'Player';
+      playerNames.set(id, localPlayerName);
+      playerTeams.set(id, 'red');
+      el('player-callsign').textContent = `${localPlayerName} · RED TEAM`;
+      el('player-callsign').hidden = false;
+      el('match-hud').hidden = false;
+      addMatchEvent(`${localPlayerName} joined RED team`);
       playerHealth.set(id, localTankHealth);
       playerTankIds.set(id, DEFAULT_TANK_ID);
       el('host-room-code').textContent = id;
       el('multiplayer-panel').hidden = false;
       multiplayerPoses.set(id, { pose: localTankPose(), sequence: 0 });
-      setNetworkStatus('Hosting · 1/4 players');
     });
     peer.on('connection', connection => attachPeerConnection(connection, true));
     peer.on('error', error => {
@@ -3424,9 +3506,13 @@ function updateShots(dt) {
 
         if (tankHit && (!worldHit || tankHit.distance < worldHit.distance)) {
           const health = Math.max(0, (playerHealth.get(tankHit.targetId) ?? MAX_PLAYER_HEALTH) - shot.damage);
+          const wasAlive = (playerHealth.get(tankHit.targetId) ?? MAX_PLAYER_HEALTH) > 0;
           updateTankHealth(tankHit.targetId, health);
           if (multiplayerHost) broadcastToPeers({ type: 'tank-health', sessionId: tankHit.targetId, health });
-          if (health <= 0) broadcastTankDestroyed(tankHit.targetId);
+          if (health <= 0) {
+            broadcastTankDestroyed(tankHit.targetId);
+            if (wasAlive) handlePlayerKill(shot.ownerId, tankHit.targetId);
+          }
           if (shot.weapon === 'cannon' && health > 0) {
             if (tankHit.targetId === multiplayerSessionId) applyLocalTankImpact(shot.velocity.toArray());
             else applyRemoteTankImpact(tankHit.targetId, shot.velocity.toArray());

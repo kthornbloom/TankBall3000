@@ -32,6 +32,43 @@ let tankIndex = Math.max(0, tankIds.indexOf(DEFAULT_TANK_ID));
 let tankPreview = null;
 let pendingJoinPeer = null;
 let pendingJoinConnection = null;
+const CALLSIGN_KEY = 'tankball3000.callsign';
+let callsign = localStorage.getItem(CALLSIGN_KEY) || '';
+let callsignAction = null;
+let callsignRequired = false;
+
+function promptCallsign(action, required = false) {
+  callsignAction = action;
+  callsignRequired = required;
+  byId('callsign-input').value = callsign;
+  byId('callsign-title').textContent = required ? 'CHOOSE YOUR CALLSIGN' : 'CHANGE CALLSIGN';
+  byId('callsign-description').textContent = required
+    ? 'Choose the name other players will see in your match.'
+    : 'Your name appears above your tank and in match events.';
+  byId('callsign-cancel').hidden = required;
+  byId('callsign-modal').hidden = false;
+  queueMicrotask(() => byId('callsign-input').focus());
+}
+function openSettings() { promptCallsign(null, false); }
+byId('callsign-form').addEventListener('submit', event => {
+  event.preventDefault();
+  const value = byId('callsign-input').value.trim().slice(0, 18);
+  if (!value) { byId('callsign-input').focus(); return; }
+  callsign = value;
+  localStorage.setItem(CALLSIGN_KEY, callsign);
+  byId('player-callsign').textContent = callsign;
+  byId('callsign-modal').hidden = true;
+  const action = callsignAction;
+  callsignAction = null;
+  action?.();
+});
+byId('callsign-cancel').addEventListener('click', () => {
+  if (callsignRequired) return;
+  byId('callsign-modal').hidden = true;
+  callsignAction = null;
+});
+byId('menu-settings').addEventListener('click', openSettings);
+byId('menu-settings').hidden = false;
 
 function closePendingJoin() {
   pendingJoinPeer?.destroy();
@@ -98,6 +135,7 @@ function showScreen(screenId, animate = true) {
   const next = byId(screenId);
   const current = [byId('start-screen'), byId('level-screen'), byId('tank-screen')].find(screen => !screen.hidden);
   if (!next || current === next) return Promise.resolve();
+  byId('menu-settings').hidden = false;
   if (!animate || !current) {
   byId('start-screen').hidden = screenId !== 'start-screen';
   byId('level-screen').hidden = screenId !== 'level-screen';
@@ -234,9 +272,13 @@ async function showTankPicker() {
 }
 
 byId('menu-join').addEventListener('click', () => {
-  document.querySelector('.landing-actions').hidden = true;
-  byId('join-form').hidden = false;
-  byId('room-code').focus();
+  const enterJoin = () => {
+    document.querySelector('.landing-actions').hidden = true;
+    byId('join-form').hidden = false;
+    byId('room-code').focus();
+  };
+  if (!callsign) promptCallsign(enterJoin, true);
+  else enterJoin();
 });
 byId('back-to-menu').addEventListener('click', () => {
   closePendingJoin();
@@ -265,7 +307,10 @@ byId('continue-join').addEventListener('click', async () => {
 byId('room-code').addEventListener('keydown', event => {
   if (event.key === 'Enter') byId('continue-join').click();
 });
-byId('menu-host').addEventListener('click', () => showLevels('host'));
+byId('menu-host').addEventListener('click', () => {
+  if (!callsign) promptCallsign(() => showLevels('host'), true);
+  else showLevels('host');
+});
 byId('menu-freeplay').addEventListener('click', () => showLevels('freeplay'));
 byId('level-back').addEventListener('click', () => {
   if (mode === 'join') {
@@ -331,8 +376,10 @@ byId('confirm-tank').addEventListener('click', async () => {
   byId('loading-level-art').src = LEVELS[selectedLevelId || DEFAULT_LEVEL_ID]?.thumbnailImage || '';
   byId('game-loading').style.setProperty('--loading-progress', '8%');
   byId('game-loading').hidden = false;
+  byId('menu-settings').hidden = true;
   window.tankGameSelection = {
     mode,
+    playerName: callsign || 'Player',
     roomCode: byId('room-code').value.trim().toUpperCase(),
     levelId: selectedLevelId || DEFAULT_LEVEL_ID,
     tankId: tankIds[tankIndex],
