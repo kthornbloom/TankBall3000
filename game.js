@@ -1937,6 +1937,7 @@ function handlePlayerKill(killerId, victimId) {
 function updatePeerCount() {
   const count = multiplayerHost ? peerConnections.size + 1 : null;
   if (count !== null) {
+    if (multiplayerSessionId) setNetworkStatus(`Hosting · ${count}/4 players`);
     for (const connection of peerConnections.values()) {
       if (connection.open) connection.send({ type: 'room-count', count, state: matchState() });
     }
@@ -2610,7 +2611,14 @@ async function hostMultiplayerGame() {
     const peer = await createPeer(roomCode);
     multiplayerPeer = peer;
     multiplayerHost = true;
+    const openTimeout = window.setTimeout(() => {
+      if (multiplayerPeer !== peer || multiplayerSessionId) return;
+      setNetworkStatus('Could not reach the room service · try again');
+      peer.destroy();
+      multiplayerPeer = null;
+    }, 20000);
     peer.on('open', id => {
+      window.clearTimeout(openTimeout);
       multiplayerSessionId = id;
       localPlayerName = GAME_SELECTION.playerName || 'Player';
       playerNames.set(id, localPlayerName);
@@ -2624,9 +2632,11 @@ async function hostMultiplayerGame() {
       el('host-room-code').textContent = id;
       el('multiplayer-panel').hidden = false;
       multiplayerPoses.set(id, { pose: localTankPose(), sequence: 0 });
+      setNetworkStatus('Hosting · 1/4 players');
     });
     peer.on('connection', connection => attachPeerConnection(connection, true));
     peer.on('error', error => {
+      window.clearTimeout(openTimeout);
       console.error('PeerJS error:', error);
       setNetworkStatus(`Could not host: ${error.type || error.message}`);
       peer.destroy();
