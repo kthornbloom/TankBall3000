@@ -2598,11 +2598,8 @@ function generateRoomCode() {
 
 async function createPeer(id) {
   const { Peer } = await import('peerjs');
-  return new Peer(id, {
-    config: {
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-    }
-  });
+  // Use PeerJS defaults, which include TURN relays for restrictive NATs.
+  return new Peer(id);
 }
 
 async function hostMultiplayerGame() {

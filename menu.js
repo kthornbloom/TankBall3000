@@ -80,13 +80,19 @@ function closePendingJoin() {
 
 async function connectToRoom(roomCode) {
   const { Peer } = await import('peerjs');
-  const peer = new Peer({ config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] } });
+  // Keep PeerJS's default ICE servers, including TURN relays for restrictive NATs.
+  const peer = new Peer();
   pendingJoinPeer = peer;
 
   return new Promise((resolve, reject) => {
     let connection = null;
     let settled = false;
-    const timeout = window.setTimeout(() => fail(new Error('Host did not respond. Check the code and try again.')), 15000);
+    let phase = 'connecting to the room service';
+    const timeout = window.setTimeout(() => fail(new Error(
+      phase === 'waiting for room details'
+        ? 'The host connection opened but did not send room details. Make sure the host is still in the match and try again.'
+        : `Connection timed out while ${phase}. Check your network and try again.`
+    )), 20000);
     const cleanupListeners = () => {
       window.clearTimeout(timeout);
       if (connection) {
@@ -105,7 +111,7 @@ async function connectToRoom(roomCode) {
     const onConnectionError = error => fail(new Error(error.type === 'peer-unavailable'
       ? 'Room not found. Check the code and try again.'
       : 'Could not connect to that room. Try again.'));
-    const onPeerError = () => fail(new Error('Could not reach the room service. Try again.'));
+    const onPeerError = error => fail(new Error(`Could not reach the room service${error?.type ? ` (${error.type})` : ''}. Try again.`));
     const onData = message => {
       if (settled) return;
       if (message?.type === 'room-full') {
@@ -122,11 +128,15 @@ async function connectToRoom(roomCode) {
 
     peer.on('error', onPeerError);
     peer.on('open', () => {
+      phase = 'connecting to the host';
       connection = peer.connect(roomCode, { reliable: true, serialization: 'json' });
       pendingJoinConnection = connection;
       connection.on('data', onData);
       connection.on('error', onConnectionError);
-      connection.on('open', () => connection.send({ type: 'room-info-request' }));
+      connection.on('open', () => {
+        phase = 'waiting for room details';
+        connection.send({ type: 'room-info-request' });
+      });
     });
   });
 }
