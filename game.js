@@ -76,6 +76,7 @@ const MUSIC_TRACKS = [
 const ENGINE_AUDIO_URL = './assets/audio/engine.ogg';
 const THRUST_AUDIO_URL = './assets/audio/boost.mp3';
 const RELOAD_AUDIO_URL = './assets/audio/reload.mp3';
+const OVERHEAT_AUDIO_URL = './assets/audio/hiss.mp3';
 
 const DRIVE_COLLISION_THRESHOLD = 3.5;
 const COLLISION_COOLDOWN = 0.3;
@@ -455,6 +456,9 @@ collisionAudio.volume = 0.8;
 const explosionAudio = new Audio(EXPLOSION_AUDIO_URL);
 explosionAudio.preload = 'auto';
 explosionAudio.volume = 0.8;
+const overheatAudio = new Audio(OVERHEAT_AUDIO_URL);
+overheatAudio.preload = 'auto';
+overheatAudio.volume = 0.65;
 const musicAudio = new Audio();
 musicAudio.preload = 'none';
 musicAudio.volume = 0.05;
@@ -526,6 +530,9 @@ function configureThrusterEffects(root) {
   thrusterVisualMaterials = [];
   root.traverse(obj => {
     if (obj.isLight) {
+      // Thruster lights move with the tank; shadowing them forces a costly
+      // shadow-map update on the first boost and while thrust is active.
+      obj.castShadow = false;
       thrusterLights.push({
         light: obj,
         intensity: obj.intensity,
@@ -2855,6 +2862,7 @@ function setMagnetsActive(active, playSound = true) {
 }
 
 function startMinigunAudio() {
+  if (minigunOverheated || !fireHeld || selectedWeapon !== 'minigun') return;
   if (minigunAudio.paused) {
     const promise = minigunAudio.play();
     if (promise && promise.catch) promise.catch(() => {});
@@ -3113,6 +3121,7 @@ function fireShot() {
       minigunOverheated = true;
       fireHeld = false;
       stopMinigunAudio();
+      playOneShot(overheatAudio);
       announceWeaponAudio(false);
     }
   }
@@ -3521,7 +3530,13 @@ function updateShots(dt) {
       const progress = Math.max(0, shot.life / shot.maxLife);
       shot.mesh.scale.setScalar(0.3 + (1 - progress) * 1.15);
       shot.mesh.traverse(object => {
-        if (object.material) object.material.opacity = object.material.userData.baseOpacity * progress;
+        if (object.material) {
+          const materials = Array.isArray(object.material) ? object.material : [object.material];
+          materials.forEach(material => {
+            const baseOpacity = material.userData?.baseOpacity ?? material.opacity;
+            material.opacity = baseOpacity * progress;
+          });
+        }
         if (object.isLight) object.intensity = object.userData.baseIntensity * progress;
       });
     } else if (shot.kind === 'shockwave') {
@@ -4490,7 +4505,7 @@ function update(dt) {
   }
 
   // Hold left mouse for continuous minigun fire. Cannon remains single-shot.
-  if (fireHeld && WEAPONS[selectedWeapon].triggerMode === 'automatic') {
+  if (fireHeld && selectedWeapon === 'minigun' && !minigunOverheated && WEAPONS[selectedWeapon].triggerMode === 'automatic') {
     minigunAccumulator += dt;
     startMinigunAudio();
     const fireInterval = 1 / WEAPONS[selectedWeapon].shotsPerSecond;
@@ -4755,7 +4770,8 @@ window.addEventListener('keydown', event => {
 
     forwardSpeed = Math.min(
       GROUND_BOOST_MAX_SPEED,
-      forwardSpeed + GROUND_BOOST_IMPULSE
+      forwardSpeed + GROUND_BOOST_IMPULSE,
+      MAX_SPEED + GROUND_BOOST_IMPULSE
     );
   }
 
