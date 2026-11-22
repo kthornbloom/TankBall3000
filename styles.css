@@ -1460,6 +1460,27 @@ body.game-started #hud .hud-health,body.game-started #hud .hud-mag,body.game-sta
   #hud .hud-mag { left:calc(max(8px,env(safe-area-inset-left)) + min(220px,32vw) + 10px); }
 }
 
+/* Boost can be triggered from the joystick edge; keep the utility buttons high. */
+@media (any-pointer:coarse) {
+  #move-stick small { max-width:94px; padding:0 3px; font-size:6px; letter-spacing:.06em; text-align:center; }
+  .touch-action[data-touch-key="ShiftLeft"],
+  .touch-action[data-touch-key="ControlLeft"] { position:fixed; right:max(16px,calc(env(safe-area-inset-right) + 10px)); left:auto; width:58px; height:58px; }
+  .touch-action[data-touch-key="ShiftLeft"] { top:max(16px,calc(env(safe-area-inset-top) + 10px)); }
+  .touch-action[data-touch-key="ControlLeft"] { top:max(84px,calc(env(safe-area-inset-top) + 78px)); }
+  .touch-fire { top:43px; right:0; width:84px; height:84px; }
+  .touch-actions { width:170px; height:170px; }
+  #match-hud { top:max(154px,calc(env(safe-area-inset-top) + 142px)); }
+}
+@media (any-pointer:coarse) and (min-width:700px) and (min-height:600px) {
+  .touch-action[data-touch-key="ShiftLeft"],
+  .touch-action[data-touch-key="ControlLeft"] { right:max(28px,calc(env(safe-area-inset-right) + 18px)); width:68px; height:68px; font-size:9px; }
+  .touch-action[data-touch-key="ShiftLeft"] { top:max(24px,calc(env(safe-area-inset-top) + 16px)); }
+  .touch-action[data-touch-key="ControlLeft"] { top:max(106px,calc(env(safe-area-inset-top) + 98px)); }
+  .touch-fire { top:36px; width:96px; height:96px; }
+  .touch-actions { width:184px; height:194px; }
+  #match-hud { top:max(184px,calc(env(safe-area-inset-top) + 174px)); }
+}
+
 /* Short landscape viewports (most horizontal phones). */
 @media (orientation:landscape) and (max-height:520px) and (any-pointer:coarse) {
   #start-screen { overflow-y:auto; }

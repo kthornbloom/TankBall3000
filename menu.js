@@ -472,7 +472,7 @@ byId('confirm-tank').addEventListener('click', async () => {
     hostConnection: mode === 'join' ? pendingJoinConnection : null
   };
   try {
-    await import('./game.js?v=20261122-4');
+    await import('./game.js?v=20261122-6');
     tankPreview?.dispose();
   } catch (error) {
     console.error('Could not start game:', error);

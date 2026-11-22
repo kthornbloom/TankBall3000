@@ -4857,6 +4857,7 @@ if (isTouchDevice) {
   const stick = el('move-stick');
   const stickKnob = stick.querySelector('span');
   let stickPointer = null;
+  let stickBoostActive = false;
   let aimPointer = null;
   let aimLast = null;
   const setTouchKey = (code, pressed) => { keys[code] = pressed; };
@@ -4869,6 +4870,11 @@ if (isTouchDevice) {
     const scale = Math.min(1, stickRadius / distance);
     const x = dx * scale;
     const y = dy * scale;
+    const boostAtEdge = distance >= stickRadius * 0.78;
+    if (boostAtEdge !== stickBoostActive) {
+      window.dispatchEvent(new KeyboardEvent(boostAtEdge ? 'keydown' : 'keyup', { code: 'ShiftLeft', bubbles: true }));
+      stickBoostActive = boostAtEdge;
+    }
     stickKnob.style.transform = `translate(${x}px, ${y}px)`;
     setTouchKey('KeyA', x < -14); setTouchKey('KeyD', x > 14);
     setTouchKey('KeyW', y < -14); setTouchKey('KeyS', y > 14);
@@ -4876,6 +4882,8 @@ if (isTouchDevice) {
   const clearStick = () => {
     stickPointer = null;
     stickKnob.style.transform = '';
+    if (stickBoostActive) window.dispatchEvent(new KeyboardEvent('keyup', { code: 'ShiftLeft', bubbles: true }));
+    stickBoostActive = false;
     for (const code of ['KeyW', 'KeyA', 'KeyS', 'KeyD']) setTouchKey(code, false);
   };
   stick.addEventListener('pointerdown', event => {
@@ -4895,10 +4903,31 @@ if (isTouchDevice) {
     const release = () => window.dispatchEvent(new KeyboardEvent('keyup', { code, bubbles: true }));
     button.addEventListener('pointerup', release); button.addEventListener('pointercancel', release); button.addEventListener('lostpointercapture', release);
   });
-  controls.querySelector('[data-touch-action="fire"]').addEventListener('pointerdown', event => { event.preventDefault(); beginFiring(); });
   const fireButton = controls.querySelector('[data-touch-action="fire"]');
-  fireButton.addEventListener('pointerdown', event => fireButton.setPointerCapture(event.pointerId));
-  for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) fireButton.addEventListener(name, endFiring);
+  let firePointer = null;
+  let fireLast = null;
+  fireButton.addEventListener('pointerdown', event => {
+    event.preventDefault();
+    if (!gameStarted || pauseMenuOpen) return;
+    firePointer = event.pointerId;
+    fireLast = { x: event.clientX, y: event.clientY };
+    fireButton.setPointerCapture(event.pointerId);
+    beginFiring();
+  });
+  window.addEventListener('pointermove', event => {
+    if (event.pointerId !== firePointer || !fireLast) return;
+    const dx = event.clientX - fireLast.x;
+    const dy = event.clientY - fireLast.y;
+    fireLast = { x: event.clientX, y: event.clientY };
+    applyAimDelta(-dx * MOUSE_SENSITIVITY * 1.8, -dy * MOUSE_SENSITIVITY * 1.8);
+  });
+  const finishFirePointer = event => {
+    if (firePointer === null || (event?.pointerId !== undefined && event.pointerId !== firePointer)) return;
+    firePointer = null;
+    fireLast = null;
+    endFiring();
+  };
+  for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) fireButton.addEventListener(name, finishFirePointer);
   const weaponsBySlot = [DEFAULT_TANK.primaryWeapon, DEFAULT_TANK.secondaryWeapon, DEFAULT_TANK.tertiaryWeapon];
   document.querySelectorAll('[data-weapon-slot]').forEach(slot => {
     const select = () => setWeapon(weaponsBySlot[Number(slot.dataset.weaponSlot) - 1]);
