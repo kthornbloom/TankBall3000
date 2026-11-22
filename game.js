@@ -1946,8 +1946,14 @@ function handlePlayerKill(killerId, victimId) {
 }
 
 function updatePeerCount() {
-  const count = multiplayerHost ? peerConnections.size + 1 : null;
+  const hostConnections = multiplayerHost ? [...peerConnections.values()] : null;
+  const connectedPeers = hostConnections?.filter(connection => connection.open).length ?? null;
+  const count = connectedPeers === null ? null : connectedPeers + 1;
   if (count !== null) {
+    logMultiplayerConnection('Updated host player count', {
+      connectedPlayers: count,
+      pendingConnections: hostConnections.filter(connection => !connection.open).length
+    });
     if (multiplayerSessionId) setNetworkStatus(`Hosting · ${count}/4 players`);
     for (const connection of peerConnections.values()) {
       if (connection.open) connection.send({ type: 'room-count', count, state: matchState() });
@@ -2644,6 +2650,66 @@ function attachPeerConnection(connection, incoming = false) {
     console.error('Peer connection error:', error);
     setNetworkStatus('Connection trouble · try rejoining');
   });
+
+  const rtc = connection.peerConnection;
+  if (rtc) {
+    let disconnectedTimer = null;
+    rtc.addEventListener('iceconnectionstatechange', () => {
+      const state = rtc.iceConnectionState;
+      logMultiplayerConnection('ICE connection state changed', {
+        role: multiplayerHost ? 'host' : 'joiner',
+        remotePeerId: connection.peer,
+        state,
+        connectionState: rtc.connectionState
+      });
+      if (state === 'disconnected') {
+        window.clearTimeout(disconnectedTimer);
+        disconnectedTimer = window.setTimeout(() => {
+          if (rtc.iceConnectionState === 'disconnected') {
+            logMultiplayerConnection('Closing peer after prolonged ICE disconnection', {
+              remotePeerId: connection.peer,
+              state: rtc.iceConnectionState
+            });
+            connection.close();
+          }
+        }, 12000);
+      } else {
+        window.clearTimeout(disconnectedTimer);
+      }
+      if (state === 'failed') connection.close();
+    });
+    rtc.addEventListener('connectionstatechange', () => {
+      logMultiplayerConnection('WebRTC connection state changed', {
+        role: multiplayerHost ? 'host' : 'joiner',
+        remotePeerId: connection.peer,
+        state: rtc.connectionState,
+        iceConnectionState: rtc.iceConnectionState
+      });
+      if (rtc.connectionState === 'failed') connection.close();
+    });
+    rtc.addEventListener('icegatheringstatechange', () => {
+      logMultiplayerConnection('ICE gathering state changed', {
+        remotePeerId: connection.peer,
+        state: rtc.iceGatheringState
+      });
+    });
+    rtc.addEventListener('icecandidate', event => {
+      if (!event.candidate) {
+        logMultiplayerConnection('ICE candidate gathering completed', { remotePeerId: connection.peer });
+        return;
+      }
+      const candidateType = event.candidate.candidate.match(/\btyp\s+(\w+)/)?.[1] || 'unknown';
+      logMultiplayerConnection('Local ICE candidate gathered', {
+        remotePeerId: connection.peer,
+        candidateType,
+        protocol: event.candidate.protocol
+      });
+    });
+  } else {
+    logMultiplayerConnection('RTCPeerConnection unavailable while attaching data connection', {
+      remotePeerId: connection.peer
+    });
+  }
 }
 
 function generateRoomCode() {
