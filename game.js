@@ -4865,7 +4865,8 @@ if (isTouchDevice) {
     const dx = event.clientX - (rect.left + rect.width / 2);
     const dy = event.clientY - (rect.top + rect.height / 2);
     const distance = Math.hypot(dx, dy) || 1;
-    const scale = Math.min(1, 38 / distance);
+    const stickRadius = Number.parseFloat(getComputedStyle(stick).getPropertyValue('--stick-radius')) || 38;
+    const scale = Math.min(1, stickRadius / distance);
     const x = dx * scale;
     const y = dy * scale;
     stickKnob.style.transform = `translate(${x}px, ${y}px)`;

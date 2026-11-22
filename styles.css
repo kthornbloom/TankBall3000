@@ -313,7 +313,7 @@ body.first-person #crosshair {
 #menu-settings:hover { color:#d8d8d8; background:transparent; }
 #menu-settings[hidden] { display:none !important; }
 body.game-started #menu-settings { display:none; }
-#callsign-modal { position:fixed; inset:0; z-index:30; display:grid; place-items:center; padding:20px; background:#0009; }
+#callsign-modal { position:fixed; inset:0; z-index:50; display:grid; place-items:center; padding:20px; background:#0009; }
 #callsign-modal[hidden] { display:none; }
 .callsign-card { width:min(460px,100%); max-height:min(92vh,780px); overflow:auto; padding:32px; color:#151515; background:#fff; border:2px solid #111; box-shadow:8px 8px 0 #111; }
 .callsign-card .start-kicker { color:#555; }
@@ -1423,6 +1423,42 @@ body.game-started #hud .hud-health,body.game-started #hud .hud-mag,body.game-sta
   cursor: pointer;
 }
 #hud #copy-room-code:hover { color: #07141b; background: #bceaff; }
+
+/* Touch layout: keep the right edge clear for drag-to-look. */
+#hud .hud-mag { top:auto; right:auto; bottom:165px; left:34px; }
+.mag-icon { color:#67dfff; border-color:#70d9ff9c; }
+.mag-icon svg { width:17px; height:17px; fill:none; stroke:currentColor; stroke-width:2.2; stroke-linecap:round; stroke-linejoin:round; }
+@media (any-pointer:coarse) {
+  #move-stick { --stick-radius:38px; }
+  .touch-actions { right:calc(max(14px,env(safe-area-inset-right)) + 34vw); bottom:max(54px,calc(env(safe-area-inset-bottom) + 44px)); width:170px; height:170px; transform:none; }
+  .touch-action[data-touch-key="Space"] { position:fixed; left:max(46px,calc(env(safe-area-inset-left) + 28px)); bottom:max(150px,calc(env(safe-area-inset-bottom) + 144px)); }
+  .touch-thrust { top:auto; }
+  .touch-action[data-touch-key="ShiftLeft"] { top:0; left:50px; width:56px; height:56px; }
+  .touch-action[data-touch-key="ControlLeft"] { top:112px; left:50px; width:56px; height:56px; }
+  .touch-fire { top:54px; right:0; width:64px; height:64px; }
+  #hud .hud-mag { top:max(4px,env(safe-area-inset-top)); right:auto; bottom:auto; left:calc(max(8px,env(safe-area-inset-left)) + min(190px,42vw) + 8px); width:34px; height:34px; min-width:0; justify-content:center; padding:4px; border-radius:50%; }
+  #hud .hud-mag > span:nth-child(2),#hud .hud-mag i { display:none; }
+  #hud .hud-mag .mag-icon { width:24px; height:24px; border:0; color:#67dfff; font-size:0; }
+  #hud .hud-mag.is-offline .mag-icon { color:#ff7470; }
+  #hud .hud-mag.is-offline { border-color:#ff7470bb; }
+}
+@media (any-pointer:coarse) and (orientation:landscape) and (max-height:520px) {
+  #move-stick { bottom:max(92px,calc(env(safe-area-inset-bottom) + 84px)); }
+  .touch-action[data-touch-key="Space"] { bottom:max(190px,calc(env(safe-area-inset-bottom) + 184px)); }
+  .touch-actions { bottom:max(54px,calc(env(safe-area-inset-bottom) + 44px)); }
+}
+/* Larger touch screens get larger controls with more bezel clearance. */
+@media (any-pointer:coarse) and (min-width:700px) and (min-height:600px) {
+  #move-stick { --stick-radius:48px; left:max(34px,calc(env(safe-area-inset-left) + 18px)); bottom:max(34px,calc(env(safe-area-inset-bottom) + 18px)); width:136px; height:136px; }
+  #move-stick span { width:52px; height:52px; }
+  #move-stick::before { inset:24px; }
+  .touch-action[data-touch-key="Space"] { left:max(70px,calc(env(safe-area-inset-left) + 54px)); bottom:max(192px,calc(env(safe-area-inset-bottom) + 176px)); width:64px; height:64px; font-size:9px; }
+  .touch-actions { right:calc(max(24px,env(safe-area-inset-right)) + 30vw); bottom:max(88px,calc(env(safe-area-inset-bottom) + 76px)); width:184px; height:194px; }
+  .touch-action[data-touch-key="ShiftLeft"] { top:0; left:46px; width:64px; height:64px; }
+  .touch-action[data-touch-key="ControlLeft"] { top:130px; left:46px; width:64px; height:64px; }
+  .touch-fire { top:65px; right:0; width:72px; height:72px; }
+  #hud .hud-mag { left:calc(max(8px,env(safe-area-inset-left)) + min(220px,32vw) + 10px); }
+}
 
 /* Short landscape viewports (most horizontal phones). */
 @media (orientation:landscape) and (max-height:520px) and (any-pointer:coarse) {
