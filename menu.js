@@ -1,6 +1,7 @@
 import { LEVELS, DEFAULT_LEVEL_ID } from './data/levels.js';
 import { TANKS, DEFAULT_TANK_ID } from './data/tanks.js';
 import { WEAPONS } from './data/weapons.js';
+import { PEER_CONNECTION_CONFIG, PEER_DEBUG_LEVEL } from './multiplayer-config.js';
 
 const byId = id => document.getElementById(id);
 const logJoinConnection = (event, details = {}) => console.info(
@@ -86,10 +87,13 @@ function closePendingJoin() {
 async function connectToRoom(roomCode) {
   logJoinConnection('Starting room preflight', { roomCode });
   const { Peer } = await import('peerjs');
-  // Keep PeerJS's default ICE servers, including TURN relays for restrictive NATs.
-  const peer = new Peer(undefined, { debug: 3 });
+  // Use explicit public TURN relays over UDP and TCP for restrictive networks.
+  const peer = new Peer(undefined, { debug: PEER_DEBUG_LEVEL, config: PEER_CONNECTION_CONFIG });
   pendingJoinPeer = peer;
-  logJoinConnection('PeerJS client created', { debug: 3 });
+  logJoinConnection('PeerJS client created', {
+    debug: PEER_DEBUG_LEVEL,
+    iceServers: PEER_CONNECTION_CONFIG.iceServers.map(server => server.urls)
+  });
 
   return new Promise((resolve, reject) => {
     let connection = null;

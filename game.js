@@ -6,6 +6,7 @@ import { DecalGeometry } from 'three/addons/geometries/DecalGeometry.js';
 import { WEAPONS } from './data/weapons.js';
 import { TANKS, DEFAULT_TANK_ID as CATALOG_DEFAULT_TANK_ID } from './data/tanks.js';
 import { LEVELS, DEFAULT_LEVEL_ID as CATALOG_DEFAULT_LEVEL_ID } from './data/levels.js';
+import { PEER_CONNECTION_CONFIG, PEER_DEBUG_LEVEL } from './multiplayer-config.js';
 
 const GAME_SELECTION = window.tankGameSelection || {};
 const DEFAULT_TANK_ID = GAME_SELECTION.tankId || CATALOG_DEFAULT_TANK_ID;
@@ -2647,9 +2648,13 @@ function generateRoomCode() {
 
 async function createPeer(id) {
   const { Peer } = await import('peerjs');
-  // Use PeerJS defaults, which include TURN relays for restrictive NATs.
-  logMultiplayerConnection('Creating PeerJS client', { requestedPeerId: id || '(assigned by server)', debug: 3 });
-  return new Peer(id, { debug: 3 });
+  // Use explicit public TURN relays over UDP and TCP for restrictive networks.
+  logMultiplayerConnection('Creating PeerJS client', {
+    requestedPeerId: id || '(assigned by server)',
+    debug: PEER_DEBUG_LEVEL,
+    iceServers: PEER_CONNECTION_CONFIG.iceServers.map(server => server.urls)
+  });
+  return new Peer(id, { debug: PEER_DEBUG_LEVEL, config: PEER_CONNECTION_CONFIG });
 }
 
 async function hostMultiplayerGame() {
