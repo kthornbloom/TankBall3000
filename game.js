@@ -3,7 +3,6 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 import { EXRLoader } from 'three/addons/loaders/EXRLoader.js';
 import { DecalGeometry } from 'three/addons/geometries/DecalGeometry.js';
-import Peer from 'peerjs';
 import { WEAPONS } from './data/weapons.js';
 import { TANKS, DEFAULT_TANK_ID as CATALOG_DEFAULT_TANK_ID } from './data/tanks.js';
 import { LEVELS, DEFAULT_LEVEL_ID as CATALOG_DEFAULT_LEVEL_ID } from './data/levels.js';
