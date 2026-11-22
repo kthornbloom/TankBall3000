@@ -339,6 +339,9 @@ let matchOver = false;
 let hostConnection = null;
 const peerConnections = new Map();
 const multiplayerPoses = new Map();
+function logMultiplayerConnection(event, details = {}) {
+  console.info(`[TankBall3000 multiplayer ${new Date().toISOString()}] ${event}`, details);
+}
 let multiplayerSendAccumulator = 0;
 let multiplayerPoseSequence = 0;
 let multiplayerShotSequence = 0;
@@ -2337,8 +2340,17 @@ function handleRemoteContact(message) {
 
 function handlePeerMessage(connection, message) {
   if (!message || typeof message !== 'object') return;
+  if (['room-info-request', 'room-config', 'room-full', 'hello', 'match-state', 'match-event'].includes(message.type)) {
+    logMultiplayerConnection('Received handshake or room message', {
+      role: multiplayerHost ? 'host' : 'joiner',
+      remotePeerId: connection.peer,
+      type: message.type,
+      message
+    });
+  }
 
   if (message.type === 'room-info-request' && multiplayerHost) {
+    logMultiplayerConnection('Sending room configuration', { remotePeerId: connection.peer, levelId: DEFAULT_LEVEL_ID });
     connection.send({ type: 'room-config', levelId: DEFAULT_LEVEL_ID });
     return;
   }
@@ -2520,10 +2532,22 @@ function handlePeerMessage(connection, message) {
 }
 
 function attachPeerConnection(connection, incoming = false) {
-  if (connection.tankBallAttached) return;
+  if (connection.tankBallAttached) {
+    logMultiplayerConnection('Ignoring duplicate connection attachment', { remotePeerId: connection.peer });
+    return;
+  }
   connection.tankBallAttached = true;
+  logMultiplayerConnection('Attaching data connection', {
+    role: multiplayerHost ? 'host' : 'joiner',
+    direction: incoming ? 'incoming' : 'outgoing',
+    remotePeerId: connection.peer,
+    alreadyOpen: connection.open,
+    reliable: connection.reliable,
+    serialization: connection.serialization
+  });
   if (incoming && peerConnections.size >= 3) {
     connection.on('open', () => {
+      logMultiplayerConnection('Rejecting connection because room is full', { remotePeerId: connection.peer });
       connection.send({ type: 'room-full' });
       connection.close();
     });
@@ -2535,6 +2559,13 @@ function attachPeerConnection(connection, incoming = false) {
   const onOpen = () => {
     if (connection.tankBallOpenHandled) return;
     connection.tankBallOpenHandled = true;
+    logMultiplayerConnection('WebRTC data connection opened', {
+      role: multiplayerHost ? 'host' : 'joiner',
+      remotePeerId: connection.peer,
+      iceConnectionState: connection.peerConnection?.iceConnectionState,
+      connectionState: connection.peerConnection?.connectionState,
+      signalingState: connection.peerConnection?.signalingState
+    });
     peerConnections.set(connection.peer, connection);
     if (multiplayerHost) {
       playerNames.set(multiplayerSessionId, localPlayerName);
@@ -2542,6 +2573,7 @@ function attachPeerConnection(connection, incoming = false) {
       assignTeam(multiplayerSessionId);
       assignTeam(connection.peer);
       connection.send({ type: 'match-state', state: matchState() });
+      logMultiplayerConnection('Sending initial room configuration', { remotePeerId: connection.peer, levelId: DEFAULT_LEVEL_ID });
       connection.send({ type: 'room-config', levelId: DEFAULT_LEVEL_ID });
       playerHealth.set(connection.peer, MAX_PLAYER_HEALTH);
       connection.send({ type: 'tank-health', sessionId: connection.peer, health: MAX_PLAYER_HEALTH });
@@ -2564,12 +2596,22 @@ function attachPeerConnection(connection, incoming = false) {
     } else {
       hostConnection = connection;
       playerNames.set(multiplayerSessionId, localPlayerName);
+      logMultiplayerConnection('Sending joiner hello', {
+        localPeerId: multiplayerSessionId,
+        hostPeerId: connection.peer,
+        tankId: GAME_SELECTION.tankId || DEFAULT_TANK_ID
+      });
       connection.send({ type: 'hello', tankId: GAME_SELECTION.tankId || DEFAULT_TANK_ID, name: localPlayerName });
     }
   };
   connection.on('open', onOpen);
   if (connection.open) onOpen();
   connection.on('close', () => {
+    logMultiplayerConnection('Data connection closed', {
+      role: multiplayerHost ? 'host' : 'joiner', remotePeerId: connection.peer,
+      iceConnectionState: connection.peerConnection?.iceConnectionState,
+      connectionState: connection.peerConnection?.connectionState
+    });
     peerConnections.delete(connection.peer);
     if (!multiplayerSessionId) return;
     removeRemoteTank(connection.peer);
@@ -2585,6 +2627,12 @@ function attachPeerConnection(connection, incoming = false) {
     }
   });
   connection.on('error', error => {
+    console.error('[TankBall3000 multiplayer] Data connection error', {
+      remotePeerId: connection.peer,
+      iceConnectionState: connection.peerConnection?.iceConnectionState,
+      connectionState: connection.peerConnection?.connectionState,
+      error
+    });
     console.error('Peer connection error:', error);
     setNetworkStatus('Connection trouble · try rejoining');
   });
@@ -2600,7 +2648,8 @@ function generateRoomCode() {
 async function createPeer(id) {
   const { Peer } = await import('peerjs');
   // Use PeerJS defaults, which include TURN relays for restrictive NATs.
-  return new Peer(id);
+  logMultiplayerConnection('Creating PeerJS client', { requestedPeerId: id || '(assigned by server)', debug: 3 });
+  return new Peer(id, { debug: 3 });
 }
 
 async function hostMultiplayerGame() {
@@ -2608,6 +2657,7 @@ async function hostMultiplayerGame() {
   setNetworkStatus('Starting host…');
   try {
     const roomCode = generateRoomCode();
+    logMultiplayerConnection('Starting host PeerJS client', { roomCode });
     const peer = await createPeer(roomCode);
     multiplayerPeer = peer;
     multiplayerHost = true;
@@ -2619,6 +2669,7 @@ async function hostMultiplayerGame() {
     }, 20000);
     peer.on('open', id => {
       window.clearTimeout(openTimeout);
+      logMultiplayerConnection('Host signaling connected and room code reserved', { peerId: id });
       multiplayerSessionId = id;
       localPlayerName = GAME_SELECTION.playerName || 'Player';
       playerNames.set(id, localPlayerName);
@@ -2634,9 +2685,15 @@ async function hostMultiplayerGame() {
       multiplayerPoses.set(id, { pose: localTankPose(), sequence: 0 });
       setNetworkStatus('Hosting · 1/4 players');
     });
-    peer.on('connection', connection => attachPeerConnection(connection, true));
+    peer.on('connection', connection => {
+      logMultiplayerConnection('Incoming peer connection received', { remotePeerId: connection.peer });
+      attachPeerConnection(connection, true);
+    });
+    peer.on('disconnected', () => logMultiplayerConnection('Host signaling disconnected', { peerId: peer.id }));
+    peer.on('close', () => logMultiplayerConnection('Host PeerJS client closed', { peerId: peer.id }));
     peer.on('error', error => {
       window.clearTimeout(openTimeout);
+      console.error('[TankBall3000 multiplayer] Host PeerJS error', error);
       console.error('PeerJS error:', error);
       setNetworkStatus(`Could not host: ${error.type || error.message}`);
       peer.destroy();
@@ -2671,14 +2728,19 @@ async function joinMultiplayerGame() {
     multiplayerPeer = peer;
     multiplayerHost = false;
     peer.on('open', id => {
+      logMultiplayerConnection('Joiner signaling connected', { peerId: id, roomCode });
       multiplayerSessionId = id;
       const connection = peer.connect(roomCode, {
         reliable: true,
         serialization: 'json'
       });
+      logMultiplayerConnection('Joiner requesting host data connection', { localPeerId: id, hostPeerId: roomCode });
       attachPeerConnection(connection);
     });
+    peer.on('disconnected', () => logMultiplayerConnection('Joiner signaling disconnected', { peerId: peer.id }));
+    peer.on('close', () => logMultiplayerConnection('Joiner PeerJS client closed', { peerId: peer.id }));
     peer.on('error', error => {
+      console.error('[TankBall3000 multiplayer] Joiner PeerJS error', error);
       console.error('PeerJS error:', error);
       setNetworkStatus(`Could not join: ${error.type || error.message}`);
       peer.destroy();

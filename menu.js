@@ -3,6 +3,10 @@ import { TANKS, DEFAULT_TANK_ID } from './data/tanks.js';
 import { WEAPONS } from './data/weapons.js';
 
 const byId = id => document.getElementById(id);
+const logJoinConnection = (event, details = {}) => console.info(
+  `[TankBall3000 join ${new Date().toISOString()}] ${event}`,
+  details
+);
 const landingImages = [...document.querySelectorAll('.landing-image')];
 const landingGlitch = document.querySelector('.landing-glitch');
 if (landingImages.length > 1 && landingGlitch) {
@@ -71,6 +75,7 @@ byId('menu-settings').addEventListener('click', openSettings);
 byId('menu-settings').hidden = false;
 
 function closePendingJoin() {
+  if (pendingJoinPeer || pendingJoinConnection) logJoinConnection('Closing pending join connection');
   pendingJoinPeer?.destroy();
   pendingJoinPeer = null;
   pendingJoinConnection = null;
@@ -79,20 +84,25 @@ function closePendingJoin() {
 }
 
 async function connectToRoom(roomCode) {
+  logJoinConnection('Starting room preflight', { roomCode });
   const { Peer } = await import('peerjs');
   // Keep PeerJS's default ICE servers, including TURN relays for restrictive NATs.
-  const peer = new Peer();
+  const peer = new Peer(undefined, { debug: 3 });
   pendingJoinPeer = peer;
+  logJoinConnection('PeerJS client created', { debug: 3 });
 
   return new Promise((resolve, reject) => {
     let connection = null;
     let settled = false;
     let phase = 'connecting to the room service';
-    const timeout = window.setTimeout(() => fail(new Error(
-      phase === 'waiting for room details'
-        ? 'The host connection opened but did not send room details. Make sure the host is still in the match and try again.'
-        : `Connection timed out while ${phase}. Check your network and try again.`
-    )), 20000);
+    const timeout = window.setTimeout(() => {
+      logJoinConnection('Join preflight timed out', { phase, roomCode });
+      fail(new Error(
+        phase === 'waiting for room details'
+          ? 'The host connection opened but did not send room details. Make sure the host is still in the match and try again.'
+          : `Connection timed out while ${phase}. Check your network and try again.`
+      ));
+    }, 20000);
     const cleanupListeners = () => {
       window.clearTimeout(timeout);
       if (connection) {
@@ -104,16 +114,24 @@ async function connectToRoom(roomCode) {
     const fail = error => {
       if (settled) return;
       settled = true;
+      logJoinConnection('Join preflight failed', { phase, message: error.message });
       cleanupListeners();
       closePendingJoin();
       reject(error);
     };
-    const onConnectionError = error => fail(new Error(error.type === 'peer-unavailable'
-      ? 'Room not found. Check the code and try again.'
-      : 'Could not connect to that room. Try again.'));
-    const onPeerError = error => fail(new Error(`Could not reach the room service${error?.type ? ` (${error.type})` : ''}. Try again.`));
+    const onConnectionError = error => {
+      console.error('[TankBall3000 join] Data connection error', error);
+      fail(new Error(error.type === 'peer-unavailable'
+        ? 'Room not found. Check the code and try again.'
+        : 'Could not connect to that room. Try again.'));
+    };
+    const onPeerError = error => {
+      console.error('[TankBall3000 join] PeerJS error', error);
+      fail(new Error(`Could not reach the room service${error?.type ? ` (${error.type})` : ''}. Try again.`));
+    };
     const onData = message => {
       if (settled) return;
+      logJoinConnection('Received host message', { type: message?.type, message });
       if (message?.type === 'room-full') {
         fail(new Error('That room is full. Try another room code.'));
         return;
@@ -123,20 +141,35 @@ async function connectToRoom(roomCode) {
       cleanupListeners();
       window.tankGamePeer = peer;
       window.tankGameHostConnection = connection;
+      logJoinConnection('Room preflight complete', {
+        roomCode, hostPeerId: connection.peer, levelId: message.levelId, connectionOpen: connection.open
+      });
       resolve({ levelId: LEVELS[message.levelId] ? message.levelId : DEFAULT_LEVEL_ID });
     };
 
     peer.on('error', onPeerError);
+    peer.on('disconnected', () => logJoinConnection('PeerJS signaling disconnected', { peerId: peer.id }));
+    peer.on('close', () => logJoinConnection('PeerJS client closed', { peerId: peer.id }));
     peer.on('open', () => {
       phase = 'connecting to the host';
+      logJoinConnection('PeerJS signaling connected', { peerId: peer.id, roomCode });
       connection = peer.connect(roomCode, { reliable: true, serialization: 'json' });
       pendingJoinConnection = connection;
+      logJoinConnection('Data connection requested', {
+        remotePeerId: roomCode, reliable: connection.reliable, serialization: connection.serialization
+      });
       connection.on('data', onData);
       connection.on('error', onConnectionError);
       connection.on('open', () => {
         phase = 'waiting for room details';
+        logJoinConnection('WebRTC data channel opened; requesting room details', {
+          remotePeerId: connection.peer,
+          iceConnectionState: connection.peerConnection?.iceConnectionState,
+          connectionState: connection.peerConnection?.connectionState
+        });
         connection.send({ type: 'room-info-request' });
       });
+      connection.on('close', () => logJoinConnection('Data connection closed', { remotePeerId: connection.peer }));
     });
   });
 }
