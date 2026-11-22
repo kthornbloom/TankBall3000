@@ -68,6 +68,17 @@
     <p id="callsign-description">Your name will appear in multiplayer matches.</p>
     <label for="callsign-input">CALLSIGN</label>
     <input id="callsign-input" type="text" maxlength="18" placeholder="Enter your name" autocomplete="nickname" required>
+    <fieldset id="graphics-settings" hidden>
+      <legend>GRAPHICS</legend>
+      <label for="graphics-quality">RENDER QUALITY</label>
+      <select id="graphics-quality"><option value="low">LOW</option><option value="medium">MEDIUM</option><option value="high">HIGH</option></select>
+      <label class="graphics-toggle"><input id="graphics-shadows" type="checkbox"> SHADOWS</label>
+      <label class="graphics-toggle"><input id="graphics-effects" type="checkbox"> VISUAL EFFECTS</label>
+      <label for="graphics-brightness">BRIGHTNESS <output id="graphics-brightness-value">100%</output></label>
+      <input id="graphics-brightness" type="range" min="70" max="130" step="5" value="100">
+      <label for="graphics-distance">VIEW DISTANCE <output id="graphics-distance-value">100%</output></label>
+      <input id="graphics-distance" type="range" min="50" max="150" step="10" value="100">
+    </fieldset>
     <div class="callsign-actions"><button id="callsign-cancel" type="button" hidden>CANCEL</button><button type="submit">SAVE CALLSIGN</button></div>
   </form>
 </section>
@@ -154,21 +165,31 @@
   <section class="hud-weapons" aria-label="Weapons">
     <div class="hud-section-head"><span>WEAPON SYSTEMS</span><span class="hud-switch-hint">[ 1 ] [ 2 ] [ 3 ]</span></div>
     <div class="weapon-slots">
-      <div class="weapon-slot is-active" data-weapon-slot="1">
+      <div class="weapon-slot is-active" data-weapon-slot="1" role="button" tabindex="0" aria-label="Select cannon">
         <span class="weapon-number">01</span><svg viewBox="0 0 48 32" aria-hidden="true"><path d="M4 13h18l5-5h15v8H27l-5 4H4zM9 20h12v5H9zM34 16h7v7h-7z"/></svg>
         <span class="weapon-name">CANNON</span><span class="weapon-ammo">∞ <small>ROUND</small></span>
       </div>
-      <div class="weapon-slot" data-weapon-slot="2">
+      <div class="weapon-slot" data-weapon-slot="2" role="button" tabindex="0" aria-label="Select minigun">
         <span class="weapon-number">02</span><svg viewBox="0 0 48 32" aria-hidden="true"><path d="M4 12h21l5-4h14v6H30l-5 4H4zM7 18h20v4H7zM34 18h7v8h-7zM11 7h17v3H11z"/></svg>
         <span class="weapon-name">MINIGUN</span><span class="weapon-ammo">∞ <small>AMMO</small></span>
       </div>
-      <div class="weapon-slot" data-weapon-slot="3">
+      <div class="weapon-slot" data-weapon-slot="3" role="button" tabindex="0" aria-label="Select EMP pulse">
         <span class="weapon-number">03</span><svg viewBox="0 0 48 32" aria-hidden="true"><path d="M24 3 42 15 24 29 6 15zM24 9v12M16 15h16"/><circle cx="24" cy="15" r="4"/></svg>
         <span class="weapon-name">EMP PULSE</span><span class="weapon-ammo">∞ <small>CHARGE</small></span>
       </div>
     </div>
   </section>
   <div class="hud-runtime-values" aria-hidden="true"><span id="weapon">Main cannon [1]</span><span id="view">Third person</span><span id="speed">0</span><span id="ground-boost">Ready</span><span id="targets">0 / 0 destroyed</span><span id="flight">Magnetized</span><span id="surface">0, 1, 0</span></div>
+</div>
+
+<div id="mobile-controls" aria-label="Touch controls" hidden>
+  <div id="move-stick" class="touch-stick" role="application" aria-label="Movement joystick"><span></span><small>MOVE</small></div>
+  <div class="touch-actions" aria-label="Combat controls">
+    <button type="button" data-touch-key="Space" class="touch-action touch-thrust">THRUST</button>
+    <button type="button" data-touch-key="ShiftLeft" class="touch-action">BOOST</button>
+    <button type="button" data-touch-key="ControlLeft" class="touch-action">MAG</button>
+    <button type="button" data-touch-action="fire" class="touch-action touch-fire">FIRE</button>
+  </div>
 </div>
 
 <div id="flight-boost-meter" hidden>
@@ -198,6 +219,7 @@
     <div class="start-kicker">TANKBALL 3000</div>
     <h2>GAME MENU</h2>
     <p id="pause-menu-status"></p>
+    <button id="pause-settings" type="button">SETTINGS</button>
     <button id="pause-resume" type="button">RESUME</button>
     <button id="pause-respawn" type="button">RESPAWN</button>
     <button id="pause-main-menu" type="button">EXIT TO MAIN MENU</button>

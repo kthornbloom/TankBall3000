@@ -9,6 +9,14 @@ import { LEVELS, DEFAULT_LEVEL_ID as CATALOG_DEFAULT_LEVEL_ID } from './data/lev
 import { PEER_CONNECTION_CONFIG, PEER_DEBUG_LEVEL } from './multiplayer-config.js';
 
 const GAME_SELECTION = window.tankGameSelection || {};
+const GRAPHICS_STORAGE_KEY = 'tankball3000.graphics';
+const isTouchDevice = navigator.maxTouchPoints > 0 || matchMedia('(any-pointer: coarse)').matches;
+const DEFAULT_GRAPHICS_SETTINGS = { quality: isTouchDevice ? 'low' : 'high', shadows: !isTouchDevice, effects: !isTouchDevice, brightness: 100, distance: isTouchDevice ? 75 : 100 };
+function readGraphicsSettings() {
+  try { return { ...DEFAULT_GRAPHICS_SETTINGS, ...(window.tankGraphicsSettings || JSON.parse(localStorage.getItem(GRAPHICS_STORAGE_KEY) || '{}')) }; }
+  catch { return { ...DEFAULT_GRAPHICS_SETTINGS }; }
+}
+let graphicsSettings = readGraphicsSettings();
 const DEFAULT_TANK_ID = GAME_SELECTION.tankId || CATALOG_DEFAULT_TANK_ID;
 const DEFAULT_LEVEL_ID = GAME_SELECTION.levelId || CATALOG_DEFAULT_LEVEL_ID;
 // ============================================================
@@ -153,8 +161,9 @@ let muzzleFlashLife = 0;
 let muzzleFlashDuration = 0.1;
 let muzzleFlashPeakIntensity = 20;
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const renderer = new THREE.WebGLRenderer({ antialias: graphicsSettings.quality !== 'low' });
+const qualityPixelRatio = { low: 0.8, medium: 1.25, high: 2 };
+renderer.setPixelRatio(Math.min(devicePixelRatio, qualityPixelRatio[graphicsSettings.quality] || 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -188,6 +197,11 @@ const speedLineCenter = new THREE.Vector3();
 const speedLineReference = new THREE.Vector3();
 
 function updateSpeedLines(dt, inFlight, worldVelocity) {
+  if (!graphicsSettings.effects) {
+    speedLines.visible = false;
+    speedLineMaterial.opacity = 0;
+    return;
+  }
   const speed = worldVelocity.length();
   speedLines.visible = inFlight && speed > 0.1;
   if (!speedLines.visible) {
@@ -285,7 +299,8 @@ const centerLight = new THREE.PointLight(
 centerLight.position.set(0, 0, 0);
 centerLight.castShadow = true;
 
-centerLight.shadow.mapSize.set(2048, 2048);
+const shadowMapSizes = { low: 512, medium: 1024, high: 2048 };
+centerLight.shadow.mapSize.set(shadowMapSizes[graphicsSettings.quality] || 2048, shadowMapSizes[graphicsSettings.quality] || 2048);
 centerLight.shadow.camera.near = 1;
 centerLight.shadow.camera.far = 250;
 
@@ -300,6 +315,30 @@ scene.add(centerLight);
 // Enable soft shadow filtering
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+function applyGraphicsSettings(nextSettings = graphicsSettings) {
+  graphicsSettings = { ...DEFAULT_GRAPHICS_SETTINGS, ...nextSettings };
+  const pixelRatio = Math.min(devicePixelRatio, qualityPixelRatio[graphicsSettings.quality] || 2);
+  renderer.setPixelRatio(pixelRatio);
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.toneMappingExposure = graphicsSettings.brightness / 100;
+  camera.far = 1500 * graphicsSettings.distance / 100;
+  camera.updateProjectionMatrix();
+  renderer.shadowMap.enabled = graphicsSettings.shadows;
+  centerLight.castShadow = graphicsSettings.shadows;
+  const shadowSize = shadowMapSizes[graphicsSettings.quality] || 2048;
+  if (centerLight.shadow.mapSize.x !== shadowSize || centerLight.shadow.mapSize.y !== shadowSize) {
+    centerLight.shadow.mapSize.set(shadowSize, shadowSize);
+    centerLight.shadow.map?.dispose();
+    centerLight.shadow.map = null;
+  }
+  if (!graphicsSettings.effects) {
+    speedLines.visible = false;
+    speedLineMaterial.opacity = 0;
+  }
+}
+applyGraphicsSettings();
+window.addEventListener('tank-graphics-settings-changed', event => applyGraphicsSettings(event.detail));
 
 const levelRoot = new THREE.Group();
 const tankRoot = new THREE.Group();
@@ -830,6 +869,7 @@ function applyPracticeTankKnockback(target, shot) {
 }
 
 function spawnTankHitEffect(point, surfaceNormal, weapon, wreckId = null) {
+  if (!graphicsSettings.effects) return;
   const cannon = weapon === 'cannon';
   if (!cannon) {
     const plume = new THREE.Group();
@@ -872,6 +912,7 @@ function spawnTankHitEffect(point, surfaceNormal, weapon, wreckId = null) {
 }
 
 function spawnWreckSmoke(point, up, wreckId) {
+  if (!graphicsSettings.effects) return;
   const life = 1.15 + Math.random() * 0.5;
   const mesh = new THREE.Mesh(
     new THREE.SphereGeometry(0.24 + Math.random() * 0.18, 7, 6),
@@ -1068,6 +1109,7 @@ function startGame(mode) {
   if (gameStarted) return;
   gameStarted = true;
   document.body.classList.add('game-started');
+  if (isTouchDevice) el('mobile-controls').hidden = false;
   el('start-screen').hidden = true;
   el('level-screen').hidden = true;
   el('tank-screen').hidden = true;
@@ -1116,6 +1158,7 @@ function closeGameMenu() {
 }
 
 el('pause-resume').addEventListener('click', closeGameMenu);
+el('pause-settings').addEventListener('click', () => window.openPlayerSettings?.());
 el('pause-respawn').addEventListener('click', () => {
   respawnLocalPlayer();
   closeGameMenu();
@@ -2991,6 +3034,7 @@ function updateEngineAudio(dt) {
 }
 
 function spawnCollisionSparks(point, surfaceNormal, impactSpeed, flight = false) {
+  if (!graphicsSettings.effects) return;
   const count = flight
     ? 22
     : Math.min(COLLISION_SPARK_COUNT + Math.floor(impactSpeed * 1.5), 28);
@@ -3194,6 +3238,13 @@ function fireShot() {
 }
 
 function showMuzzleFlash(muzzle, direction, weapon) {
+  if (!graphicsSettings.effects) {
+    muzzleFlash.visible = false;
+    muzzleFlashRing.visible = false;
+    muzzleFlame.visible = false;
+    muzzleFlashLight.intensity = 0.001;
+    return;
+  }
   const isCannon = weapon === 'cannon';
   muzzleFlashDuration = isCannon ? 0.13 : 0.075;
   muzzleFlashPeakIntensity = isCannon ? 34 : 17;
@@ -4675,7 +4726,7 @@ renderer.domElement.addEventListener('click', () => {
   if (!gameStarted || localTankHealth <= 0) return;
   engineAudioUnlocked = true;
   startEngineAudio();
-  if (!mouseCaptured) {
+  if (!isTouchDevice && !mouseCaptured) {
     renderer.domElement.requestPointerLock();
   }
 });
@@ -4704,26 +4755,32 @@ renderer.domElement.addEventListener('mousedown', event => {
   }
 
   if (event.button === 0 && mouseCaptured) {
-    if (empDisabledRemaining > 0) return;
-    fireHeld = true;
-    if (WEAPONS[selectedWeapon].triggerMode === 'single') {
-      fireShot();
-    } else {
-      minigunAccumulator = 1 / WEAPONS[selectedWeapon].shotsPerSecond;
-      startMinigunAudio();
-      announceWeaponAudio(true);
-    }
+    beginFiring();
   }
 });
+
+function beginFiring() {
+  if (empDisabledRemaining > 0 || !gameStarted || pauseMenuOpen || localTankHealth <= 0) return;
+  fireHeld = true;
+  if (WEAPONS[selectedWeapon].triggerMode === 'single') fireShot();
+  else {
+    minigunAccumulator = 1 / WEAPONS[selectedWeapon].shotsPerSecond;
+    startMinigunAudio();
+    announceWeaponAudio(true);
+  }
+}
+function endFiring() {
+  fireHeld = false;
+  minigunAccumulator = 0;
+  stopMinigunAudio();
+  announceWeaponAudio(false);
+}
 
 window.addEventListener('mouseup', event => {
   if (event.button === 2) setZoom(false);
 
   if (event.button === 0) {
-    fireHeld = false;
-    minigunAccumulator = 0;
-    stopMinigunAudio();
-    announceWeaponAudio(false);
+    endFiring();
   }
 });
 
@@ -4754,8 +4811,10 @@ document.addEventListener('mousemove', event => {
 
   if (!mouseCaptured) return;
 
-  const yaw = -event.movementX * MOUSE_SENSITIVITY;
-  const pitch = -event.movementY * MOUSE_SENSITIVITY;
+  applyAimDelta(-event.movementX * MOUSE_SENSITIVITY, -event.movementY * MOUSE_SENSITIVITY);
+});
+
+function applyAimDelta(yaw, pitch) {
 
   if (flightState === 'flying' || flightState === 'drifting') {
     // Rotate the full target frame so yaw remains well-defined even when the
@@ -4789,7 +4848,78 @@ document.addEventListener('mousemove', event => {
       MAX_AIM_PITCH
     );
   }
-});
+}
+
+// Touch controls feed the same movement keys, weapon selection, firing, thrust,
+// boost, reattach and aim routines used by keyboard and mouse input.
+if (isTouchDevice) {
+  const controls = el('mobile-controls');
+  const stick = el('move-stick');
+  const stickKnob = stick.querySelector('span');
+  let stickPointer = null;
+  let aimPointer = null;
+  let aimLast = null;
+  const setTouchKey = (code, pressed) => { keys[code] = pressed; };
+  const setStick = (event) => {
+    const rect = stick.getBoundingClientRect();
+    const dx = event.clientX - (rect.left + rect.width / 2);
+    const dy = event.clientY - (rect.top + rect.height / 2);
+    const distance = Math.hypot(dx, dy) || 1;
+    const scale = Math.min(1, 38 / distance);
+    const x = dx * scale;
+    const y = dy * scale;
+    stickKnob.style.transform = `translate(${x}px, ${y}px)`;
+    setTouchKey('KeyA', x < -14); setTouchKey('KeyD', x > 14);
+    setTouchKey('KeyW', y < -14); setTouchKey('KeyS', y > 14);
+  };
+  const clearStick = () => {
+    stickPointer = null;
+    stickKnob.style.transform = '';
+    for (const code of ['KeyW', 'KeyA', 'KeyS', 'KeyD']) setTouchKey(code, false);
+  };
+  stick.addEventListener('pointerdown', event => {
+    if (!gameStarted || pauseMenuOpen) return;
+    event.preventDefault(); stickPointer = event.pointerId; stick.setPointerCapture(event.pointerId); setStick(event);
+  });
+  stick.addEventListener('pointermove', event => { if (event.pointerId === stickPointer) setStick(event); });
+  stick.addEventListener('pointerup', event => { if (event.pointerId === stickPointer) clearStick(); });
+  stick.addEventListener('pointercancel', clearStick);
+  controls.querySelectorAll('[data-touch-key]').forEach(button => {
+    const code = button.dataset.touchKey;
+    button.addEventListener('pointerdown', event => {
+      event.preventDefault(); if (!gameStarted || pauseMenuOpen) return;
+      button.setPointerCapture(event.pointerId);
+      window.dispatchEvent(new KeyboardEvent('keydown', { code, bubbles: true }));
+    });
+    const release = () => window.dispatchEvent(new KeyboardEvent('keyup', { code, bubbles: true }));
+    button.addEventListener('pointerup', release); button.addEventListener('pointercancel', release); button.addEventListener('lostpointercapture', release);
+  });
+  controls.querySelector('[data-touch-action="fire"]').addEventListener('pointerdown', event => { event.preventDefault(); beginFiring(); });
+  const fireButton = controls.querySelector('[data-touch-action="fire"]');
+  fireButton.addEventListener('pointerdown', event => fireButton.setPointerCapture(event.pointerId));
+  for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) fireButton.addEventListener(name, endFiring);
+  const weaponsBySlot = [DEFAULT_TANK.primaryWeapon, DEFAULT_TANK.secondaryWeapon, DEFAULT_TANK.tertiaryWeapon];
+  document.querySelectorAll('[data-weapon-slot]').forEach(slot => {
+    const select = () => setWeapon(weaponsBySlot[Number(slot.dataset.weaponSlot) - 1]);
+    slot.addEventListener('click', select);
+    slot.addEventListener('keydown', event => {
+      if (event.code === 'Enter' || event.code === 'Space') { event.preventDefault(); select(); }
+    });
+  });
+  renderer.domElement.addEventListener('pointerdown', event => {
+    if (!gameStarted || pauseMenuOpen || event.pointerType !== 'touch' || event.target.closest('#mobile-controls')) return;
+    aimPointer = event.pointerId; aimLast = { x: event.clientX, y: event.clientY };
+    renderer.domElement.setPointerCapture(event.pointerId);
+  });
+  renderer.domElement.addEventListener('pointermove', event => {
+    if (event.pointerId !== aimPointer || !aimLast) return;
+    const dx = event.clientX - aimLast.x, dy = event.clientY - aimLast.y;
+    aimLast = { x: event.clientX, y: event.clientY };
+    applyAimDelta(-dx * MOUSE_SENSITIVITY * 1.8, -dy * MOUSE_SENSITIVITY * 1.8);
+  });
+  const clearAim = () => { aimPointer = null; aimLast = null; };
+  renderer.domElement.addEventListener('pointerup', clearAim); renderer.domElement.addEventListener('pointercancel', clearAim);
+}
 
 window.addEventListener('keydown', event => {
   if (event.code === 'Escape' && gameStarted) {
@@ -4898,9 +5028,7 @@ window.addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
 
-  renderer.setSize(innerWidth, innerHeight);
-
-  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  applyGraphicsSettings();
 });
 
 function animate() {

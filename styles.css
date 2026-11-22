@@ -315,7 +315,7 @@ body.first-person #crosshair {
 body.game-started #menu-settings { display:none; }
 #callsign-modal { position:fixed; inset:0; z-index:30; display:grid; place-items:center; padding:20px; background:#0009; }
 #callsign-modal[hidden] { display:none; }
-.callsign-card { width:min(420px,100%); padding:32px; color:#151515; background:#fff; border:2px solid #111; box-shadow:8px 8px 0 #111; }
+.callsign-card { width:min(460px,100%); max-height:min(92vh,780px); overflow:auto; padding:32px; color:#151515; background:#fff; border:2px solid #111; box-shadow:8px 8px 0 #111; }
 .callsign-card .start-kicker { color:#555; }
 .callsign-card h2 { margin:12px 0 8px; font:32px/1 var(--menu-title); }
 .callsign-card p { margin:0 0 22px; color:#555; font:14px/1.45 Archivo,Arial,sans-serif; }
@@ -325,6 +325,16 @@ body.game-started #menu-settings { display:none; }
 .callsign-actions button { padding:11px 14px; color:#fff; background:#111; border:1px solid #111; border-radius:0; font:700 10px Archivo,Arial,sans-serif; letter-spacing:.12em; cursor:pointer; }
 .callsign-actions button:hover { color:#111; background:#e8e8e8; }
 .callsign-actions button[hidden] { display:none; }
+#graphics-settings { display:grid; grid-template-columns:1fr auto; gap:9px 14px; margin:22px 0 0; padding:16px 0 0; border:0; border-top:1px solid #ccc; }
+#graphics-settings[hidden] { display:none; }
+#graphics-settings legend { padding:0 8px 0 0; font:700 10px Archivo,Arial,sans-serif; letter-spacing:.15em; }
+#graphics-settings > label { align-self:center; margin:0; color:#333; font:700 9px Archivo,Arial,sans-serif; letter-spacing:.1em; }
+#graphics-settings select { min-width:132px; padding:7px; color:#111; background:#fff; border:1px solid #777; border-radius:0; font:700 10px Archivo,Arial,sans-serif; }
+#graphics-settings .graphics-toggle { grid-column:1 / -1; display:flex; align-items:center; gap:8px; padding:3px 0; cursor:pointer; }
+#graphics-settings input[type="checkbox"] { width:16px; height:16px; accent-color:#111; }
+#graphics-settings input[type="range"] { grid-column:1 / -1; width:100%; margin:0 0 8px; accent-color:#111; }
+#graphics-settings output { float:right; color:#777; }
+#pause-menu #pause-settings { margin-bottom:8px; }
 #match-hud { position:fixed; z-index:6; top:18px; right:18px; width:min(320px,38vw); color:#eaf7ff; font:700 11px Archivo,Arial,sans-serif; pointer-events:none; }
 #match-hud[hidden], #player-callsign[hidden] { display:none; }
 .match-score { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:#07131cdb; border:1px solid #9ddfff72; box-shadow:0 0 18px #00b7ff16; }
@@ -1284,6 +1294,52 @@ body.game-started #hud .hud-health,body.game-started #hud .hud-mag,body.game-sta
 @media(max-width:700px) { .hud-health { top:12px; left:12px; width:45vw; } }
 @media(prefers-reduced-motion:reduce) { body.game-started #hud .hud-health,body.game-started #hud .hud-mag,body.game-started #hud .hud-speed,body.game-started #hud .hud-weapons { animation:none; } }
 
+/* Touch play: reserve the lower corners for controls and keep combat readouts compact. */
+#mobile-controls { display:none; }
+@media (any-pointer:coarse) {
+  #mobile-controls:not([hidden]) { display:block; position:fixed; z-index:12; inset:0; pointer-events:none; touch-action:none; }
+  #mobile-controls button,#move-stick { pointer-events:auto; touch-action:none; user-select:none; -webkit-user-select:none; }
+  #move-stick { position:absolute; left:max(18px,env(safe-area-inset-left)); bottom:max(22px,env(safe-area-inset-bottom)); width:112px; height:112px; display:grid; place-items:center; border:1px solid #bfeeff72; border-radius:50%; background:#07172272; box-shadow:inset 0 0 22px #42cfff1e; }
+  #move-stick::before { content:""; position:absolute; inset:20px; border:1px dashed #bfeeff50; border-radius:50%; }
+  #move-stick span { position:absolute; z-index:1; width:44px; height:44px; border:1px solid #d7f6ffbd; border-radius:50%; background:#42cfff78; box-shadow:0 0 14px #42cfff66; }
+  #move-stick small { position:absolute; bottom:7px; color:#d8f6ffb8; font:700 7px Archivo,Arial,sans-serif; letter-spacing:.17em; }
+  .touch-actions { position:absolute; right:max(14px,env(safe-area-inset-right)); bottom:max(72px,calc(env(safe-area-inset-bottom) + 66px)); width:138px; height:220px; pointer-events:none; }
+  .touch-action { position:absolute; width:56px; height:56px; min-height:0; padding:5px; border:1px solid #bcecff9c; border-radius:50%; color:#e8faff; background:#08202dc9; box-shadow:0 0 15px #20bfff24; font:800 8px Archivo,Arial,sans-serif; letter-spacing:.08em; }
+  .touch-action:active { background:#167da3e8; transform:scale(.96); }
+  .touch-thrust { top:0; left:18px; color:#d7f8ff; }
+  .touch-action[data-touch-key="ShiftLeft"] { top:61px; left:0; }
+  .touch-action[data-touch-key="ControlLeft"] { top:143px; left:18px; }
+  .touch-fire { top:68px; right:0; width:68px; height:68px; color:#fff5d8; border-color:#ffd37a; background:#493419db; }
+  .hud-health { top:max(8px,env(safe-area-inset-top)); left:max(8px,env(safe-area-inset-left)); width:min(190px,42vw); padding:7px 9px; background:#04121aa8 !important; }
+  .hud-health .hud-eyebrow { font-size:7px; letter-spacing:.1em; }
+  .hud-health .hud-topline strong { font-size:17px; }
+  .hud-health-track { margin-top:5px; }
+  .hud-mag { top:max(8px,env(safe-area-inset-top)); right:max(8px,env(safe-area-inset-right)); padding:5px 7px; gap:6px; background:#04121aa8 !important; }
+  .mag-icon { width:22px; height:22px; font-size:15px; }
+  .hud-mag small { font-size:6px; }
+  .hud-mag strong { font-size:11px; }
+  .hud-speed,.hud-ruler { display:none !important; }
+  .hud-weapons { right:50%; bottom:max(8px,env(safe-area-inset-bottom)); width:min(228px,60vw); padding:0; transform:translateX(50%); background:transparent !important; }
+  .hud-weapons .hud-section-head { display:none; }
+  .weapon-slots { grid-template-columns:repeat(3,minmax(0,1fr)); gap:4px; margin:0; }
+  .weapon-slot { display:flex; min-width:0; height:62px; padding:5px 3px; flex-direction:column; align-items:center; justify-content:center; gap:3px; border:1px solid #a5d9ec72; background:#06151fdc; text-align:center; pointer-events:auto; touch-action:manipulation; cursor:pointer; }
+  .weapon-slot:focus-visible { outline:2px solid #ffd37a; outline-offset:2px; }
+  .weapon-slot .weapon-number,.weapon-slot .weapon-ammo { display:none; }
+  .weapon-slot svg { width:24px; height:20px; flex:none; }
+  .weapon-name { max-width:100%; margin:0; overflow:hidden; font-size:8px; line-height:1; text-overflow:ellipsis; }
+  #match-hud { top:44px; right:8px; bottom:auto; width:min(190px,48vw); }
+  #match-events { display:none; }
+  #player-callsign { display:none; }
+  #crosshair,#body-crosshair { opacity:.55; }
+  #message { top:46px; font-size:10px; }
+}
+@media (any-pointer:coarse) and (orientation:landscape) {
+  #move-stick { width:92px; height:92px; bottom:max(92px,calc(env(safe-area-inset-bottom) + 84px)); }
+  .touch-actions { bottom:max(72px,calc(env(safe-area-inset-bottom) + 66px)); transform:scale(.9); transform-origin:bottom right; }
+  .hud-weapons { width:min(228px,34vw); }
+}
+@media (any-pointer:coarse) { body.game-started canvas { touch-action:none; } }
+
 /* Rotational edge rulers */
 .hud-ruler { position:absolute; z-index:2; color:#bcefff; font:700 9px Archivo,Arial,sans-serif; letter-spacing:.16em; text-shadow:0 0 9px #4ed6ff9c; }
 .hud-ruler strong { color:#f4fcff; font:14px var(--menu-title); letter-spacing:.01em; }
@@ -1326,6 +1382,10 @@ body.game-started #hud .hud-health,body.game-started #hud .hud-mag,body.game-sta
 #flight-boost-meter.depleted #boost-bar { background:#08a9d1; box-shadow:inset 0 0 0 1px #73e8ff; }
 
 /* Host code stays attached to the health readout as part of the HUD. */
+@media (any-pointer:coarse) {
+  #hud .hud-health { top:max(4px,env(safe-area-inset-top)); left:max(8px,env(safe-area-inset-left)); width:min(190px,42vw); transform:none; }
+  #hud .hud-mag { top:max(4px,env(safe-area-inset-top)); right:max(8px,env(safe-area-inset-right)); }
+}
 #hud #multiplayer-panel {
   position: static;
   display: block;
@@ -1365,7 +1425,7 @@ body.game-started #hud .hud-health,body.game-started #hud .hud-mag,body.game-sta
 #hud #copy-room-code:hover { color: #07141b; background: #bceaff; }
 
 /* Short landscape viewports (most horizontal phones). */
-@media (orientation:landscape) and (max-height:520px) and (pointer:coarse) {
+@media (orientation:landscape) and (max-height:520px) and (any-pointer:coarse) {
   #start-screen { overflow-y:auto; }
   #start-screen .start-card { justify-content:flex-start; padding:5vh 5vw 0; }
   #start-screen .start-kicker { font-size:9px; }

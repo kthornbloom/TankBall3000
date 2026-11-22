@@ -38,6 +38,14 @@ let tankPreview = null;
 let pendingJoinPeer = null;
 let pendingJoinConnection = null;
 const CALLSIGN_KEY = 'tankball3000.callsign';
+const GRAPHICS_KEY = 'tankball3000.graphics';
+const isTouchDevice = navigator.maxTouchPoints > 0 || matchMedia('(any-pointer: coarse)').matches;
+const DEFAULT_GRAPHICS = { quality: isTouchDevice ? 'low' : 'high', shadows: !isTouchDevice, effects: !isTouchDevice, brightness: 100, distance: isTouchDevice ? 75 : 100 };
+let graphicsSettings;
+try {
+  graphicsSettings = { ...DEFAULT_GRAPHICS, ...JSON.parse(localStorage.getItem(GRAPHICS_KEY) || '{}') };
+} catch { graphicsSettings = { ...DEFAULT_GRAPHICS }; }
+window.tankGraphicsSettings = graphicsSettings;
 let callsign = localStorage.getItem(CALLSIGN_KEY) || '';
 let callsignAction = null;
 let callsignRequired = false;
@@ -51,10 +59,40 @@ function promptCallsign(action, required = false) {
     ? 'Choose the name other players will see in your match.'
     : 'Your name appears above your tank and in match events.';
   byId('callsign-cancel').hidden = required;
+  byId('graphics-settings').hidden = required;
+  syncGraphicsControls();
   byId('callsign-modal').hidden = false;
   queueMicrotask(() => byId('callsign-input').focus());
 }
+function syncGraphicsControls() {
+  byId('graphics-quality').value = graphicsSettings.quality;
+  byId('graphics-shadows').checked = graphicsSettings.shadows;
+  byId('graphics-effects').checked = graphicsSettings.effects;
+  byId('graphics-brightness').value = graphicsSettings.brightness;
+  byId('graphics-distance').value = graphicsSettings.distance;
+  byId('graphics-brightness-value').value = `${graphicsSettings.brightness}%`;
+  byId('graphics-distance-value').value = `${graphicsSettings.distance}%`;
+}
+function saveGraphicsSettings() {
+  graphicsSettings = {
+    quality: byId('graphics-quality').value,
+    shadows: byId('graphics-shadows').checked,
+    effects: byId('graphics-effects').checked,
+    brightness: Number(byId('graphics-brightness').value),
+    distance: Number(byId('graphics-distance').value)
+  };
+  window.tankGraphicsSettings = graphicsSettings;
+  localStorage.setItem(GRAPHICS_KEY, JSON.stringify(graphicsSettings));
+  byId('graphics-brightness-value').value = `${graphicsSettings.brightness}%`;
+  byId('graphics-distance-value').value = `${graphicsSettings.distance}%`;
+  window.dispatchEvent(new CustomEvent('tank-graphics-settings-changed', { detail: graphicsSettings }));
+}
+for (const id of ['graphics-quality', 'graphics-shadows', 'graphics-effects', 'graphics-brightness', 'graphics-distance']) {
+  byId(id).addEventListener('input', saveGraphicsSettings);
+  byId(id).addEventListener('change', saveGraphicsSettings);
+}
 function openSettings() { promptCallsign(null, false); }
+window.openPlayerSettings = openSettings;
 byId('callsign-form').addEventListener('submit', event => {
   event.preventDefault();
   const value = byId('callsign-input').value.trim().slice(0, 18);
